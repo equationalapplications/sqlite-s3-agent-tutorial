@@ -8,7 +8,7 @@
 
 ## 1. Purpose and constraints
 
-A public tutorial that teaches the **SQLite-as-a-database-for-an-agent-on-AWS, rehydrated-by-S3** pattern, by way of a concrete working example: a Discord notification bot that fetches a daily weather (or crypto) value, posts a formatted message to a Discord webhook on a cron schedule, and persists state in a single SQLite file in S3.
+A public tutorial that teaches the **SQLite-as-a-database-for-an-agent-on-AWS, rehydrated-by-S3** pattern, by way of a concrete working example: a Discord notification bot that fetches a daily weather (or crypto) value, uses an LLM (via Amazon Bedrock) to turn the raw value into a friendly message, posts it to a Discord webhook on a cron schedule, and persists state in a single SQLite file in S3.
 
 The tutorial is built so that `npm run deploy` produces a working bot end-to-end on the first try, then walks through the moving parts in `docs/`.
 
@@ -35,15 +35,16 @@ One Lambda function, two ops, one S3 bucket, one SQLite file.
 │ schedule         ├───────────────────►│   agent Lambda (arm64)      │
 └──────────────────┘   {op:"fetch"}     │   ┌─────────────────────┐   │
                                        │   │ op = "fetch"        │   │
-┌──────────────────┐                    │   │  1. hydrate DB      │   │
-│ Discord webhook  │ ◄────── POST ──────┤   │  2. fetch external  │   │
-│ (user-supplied)  │                    │   │  3. dedup vs state  │   │
-└──────────────────┘                    │   │  4. post to Discord │   │
-                                       │   │  5. upload new DB   │   │
-┌──────────────────┐                    │   │     (If-Match)      │   │
-│ HTTP client      │  {op:"status"}     │   └─────────────────────┘   │
-│ (curl, browser)  ├───────────────────►│   ┌─────────────────────┐   │
-└──────────────────┘                    │   │ op = "status"       │   │
+                                       │   │  1. hydrate DB      │   │
+                                       │   │  2. fetch external  │   │
+                                       │   │  3. dedup vs state  │   │
+┌──────────────────┐                    │   │  4. format via LLM  │   │
+│ Amazon Bedrock   │ ◄── Converse ──────┤   │  5. post to Discord │   │
+│ (zai.glm-4.7-    │  prompt / reply    │   │  6. upload new DB   │   │
+│  flash)          │                    │   │     (If-Match)      │   │
+└──────────────────┘                    │   └─────────────────────┘   │
+                                       │   ┌─────────────────────┐   │
+                                       │   │ op = "status"       │   │
                                        │   │  1. hydrate or reuse│   │
                                        │   │  2. query state     │   │
                                        │   │  3. return JSON     │   │
@@ -54,17 +55,26 @@ One Lambda function, two ops, one S3 bucket, one SQLite file.
                                        │   │ /tmp/memory.db      │◄──┼─── hydrate
                                        │   └─────────────────────┘   │    (S3 GetObject)
                                        │             │               │
-                                       └─────────────┼───────────────┘
-                                                     ▼
-                                       ┌─────────────────────────────┐
-                                       │ s3://<bucket>/memory.db     │
-                                       │ (versioned, single object)  │
-                                       └─────────────────────────────┘
+┌──────────────────┐                    │             ▼               │
+│ Discord webhook  │ ◄────── POST ──────┤   ┌─────────────────────┐   │
+│ (user-supplied)  │  formatted msg     │   │ s3://<bucket>/      │   │
+└──────────────────┘                    │   │   memory.db         │   │
+                                       │   │  (versioned,        │   │
+                                       │   │   single object)    │   │
+                                       │   └─────────────────────┘   │
+                                       │             ▲               │
+                                       │             │               │
+┌──────────────────┐  {op:"status"}     │             │               │
+│ HTTP client      ├───────────────────►│   Function URL (read-only) │
+│ (curl, browser)  │                    │                             │
+└──────────────────┘                    └─────────────────────────────┘
 ```
 
 **One function, two ops.** The Lambda reads `op` from the event payload (EventBridge → `fetch`, Function URL → `status`). The container image and role are identical.
 
 **EventBridge payload routing.** The schedule rule's `Input` target is configured as a constant JSON string `{"op": "fetch"}` — not a transformed event payload — so the handler reads `event.op` directly without having to unwrap EventBridge's `detail` envelope. A transformed input would still produce the same runtime behaviour, but a constant input is unambiguous and survives IAM-policy changes that affect EventBridge's wrapper shape.
+
+**LLM message formatting.** Between the value fetch and the Discord post, the writer calls Amazon Bedrock (default `zai.glm-4.7-flash`) to turn the raw value into a friendly message. Dedup runs on the raw `value` *before* the LLM call (§3.1 step 3), so unchanged values never invoke Bedrock — the model is paid for only when there's actually something new to say. The model choice is overridable per environment via `bedrockModelId` (§11). The same `MessageFormatter` interface is implemented by `LocalTemplateFormatter` (Phase 1, no AWS) and `BedrockFormatter` (Phase 3, default), so the writer's hot path doesn't change between local and deployed.
 
 **`fetch` is the writer; `status` is the reader.** Both share `/tmp/memory.db`. The reader's job is to make the writer's state visible — without it, the only way to inspect the bot is `aws s3 cp` and `sqlite3`, which is bad tutorial UX. The reader is a JSON endpoint, not a UI: callers (`curl`, `aws lambda invoke`, browser address bar) see `sources[]` and `recentNotifications[]`, not a dashboard.
 
@@ -86,9 +96,13 @@ One Lambda function, two ops, one S3 bucket, one SQLite file.
 5.  For each configured source (e.g. weather, crypto):
     a. Fetch external value (HTTPS GET via SourceFetcher)
     b. Read agent_sources.last_value for this source
-    c. If new value == last_value, skip (no Discord post, no agent_notifications row)
-    d. Else: format message; POST to Discord webhook; on 2xx, INSERT agent_notifications;
-       UPDATE agent_sources SET last_value = ?, last_posted_at = ?
+    c. If new value == last_value, skip (no Discord post, no agent_notifications row, no LLM call — the model is paid for only when there is something new to say)
+    d. Else:
+       i. Call `MessageFormatter.format(source, raw_value)` → friendly message
+          (`BedrockFormatter` in Phase 3; `LocalTemplateFormatter` in Phase 1, §7.1).
+       ii. POST formatted message to Discord webhook.
+       iii. On 2xx, INSERT agent_notifications (source, value, formatted_message, posted_at);
+            UPDATE agent_sources SET last_value = ?, last_posted_at = ?.
 6.  UPDATE agent_runs SET ended_at, outcome, sources_checked, notifications_sent, error
 7.  S3 PutObject to s3://<bucket>/memory.db with If-Match: <ETag>
     - 412 PreconditionFailed → log, abort, leave old version authoritative
@@ -162,10 +176,11 @@ CREATE TABLE agent_sources (
 );
 
 CREATE TABLE agent_notifications (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  source      TEXT    NOT NULL,
-  value       TEXT    NOT NULL,
-  posted_at   INTEGER NOT NULL,
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  source             TEXT    NOT NULL,
+  value              TEXT    NOT NULL,                       -- raw fetched value (for dedup)
+  formatted_message  TEXT    NOT NULL,                       -- LLM-formatted Discord message
+  posted_at          INTEGER NOT NULL,
   FOREIGN KEY (source) REFERENCES agent_sources(name) ON DELETE CASCADE
 );
 CREATE INDEX idx_agent_notifications_source_posted_at
@@ -188,6 +203,8 @@ CREATE TABLE agent_runs (
 
 **Why three tables, not one.** `agent_sources` is the dedup state (the *what to skip*); `agent_notifications` is the *history*; `agent_runs` is the *observability log*. Conflating them — e.g. putting `last_posted_at` on `agent_notifications` — makes dedup queries depend on table scans and makes per-source "last N" queries ambiguous.
 
+**Why both `value` and `formatted_message`.** Dedup compares the raw fetched value (`72F` vs `72.1F`) — a stable, byte-for-byte check. The LLM-generated message is downstream of dedup and never used for it. Storing both lets the status op show what was posted without recomputing the LLM call, and lets future schema migrations (e.g. switching models) leave the dedup state untouched.
+
 **`outcome` and `error` are nullable on purpose.** A run row inserted at step 4 of the writer lifecycle (§3.1) and never updated is itself a record: "this run started and never finished." That signal is lost if the columns default to a fake value. Same pattern as `aws-cloud-agent`'s `agent_runs`.
 
 **`source` is a closed vocabulary.** `weather` and `crypto` only. The tutorial is intentionally narrow — readers extend it by editing one CHECK constraint and one fetch function, not by designing a registry. The constraint prevents typos like `wether` from silently producing empty dedup state.
@@ -201,6 +218,11 @@ Categorised, with the right response for each. The reader of the tutorial should
 | Failure | Where it surfaces | What we do |
 |---|---|---|
 | External API 4xx/5xx or timeout | per-source fetch | Skip that source. Append a description to `agent_runs.error`. Continue with other sources. The run completes its loop and ends with `outcome = 'success'`; the per-source failures live in the `error` column. |
+| Bedrock `AccessDeniedException` | per-source LLM call | Skip the post for that source. Append a description to `agent_runs.error` pointing at §12 (model access / IAM). Do not retry: an access failure is not transient. |
+| Bedrock `ValidationException` | per-source LLM call | Skip the post. Append a description naming the rejected field. Almost always a model-family mismatch (§12); only relevant when the reader swaps `bedrockModelId`. |
+| Bedrock `ResourceNotFoundException` | per-source LLM call | Skip the post. Append a description naming the configured id and region. The id is mistyped or the region does not carry the model. |
+| Bedrock `ThrottlingException` / 5xx | per-source LLM call | One retry within the invocation (~500ms backoff). Two failures → skip the post for that source. Append to `agent_runs.error`. The AWS SDK's adaptive retryer is layered on top of this for *transient* 5xx. |
+| Bedrock malformed response (no `output.message.content`) | per-source LLM call | Skip the post. Append a description. Do not retry — malformed responses are deterministic for a given model. |
 | Discord webhook 4xx | per-source post | Skip the `sources.last_posted_at` update and the `agent_notifications` insert for that source. The next run will retry. Append to `agent_runs.error`. |
 | Discord webhook 5xx | per-source post | Same as 4xx, but a single retry within the invocation (one retry, ~250ms backoff). Two failures → skip the source for this run. Append to `agent_runs.error`. |
 | S3 conditional write 412 | step 7 of `fetch` | **Abort loudly.** Do not retry, do not upload, do not update the local DB further. The previous snapshot stays authoritative. Update the in-progress `agent_runs` row with `outcome = 'error'` and a description of the 412, then propagate. EventBridge retries on invocation failure are disabled for this op — the failure is informational, not transient. |
@@ -231,13 +253,15 @@ Tests run against a **real SQLite file** with a real `better-sqlite3` handle —
 | S3 client | Yes | `aws-sdk-client-mock` (matches `aws-cloud-agent`). |
 | Discord webhook | Yes | A `DiscordPoster` interface; production = real `fetch`, tests = in-memory recorder. |
 | External value API | Yes | A `SourceFetcher` interface keyed by source name; production = real `fetch`, tests = returns canned values. |
+| `MessageFormatter` (Bedrock) | Yes | A `MessageFormatter` interface; production = `BedrockFormatter` (real `Converse` call against `bedrockModelId`), tests = `LocalTemplateFormatter` (same interface, deterministic output, no AWS). The writer is tested with `LocalTemplateFormatter`; the formatter itself is tested by separate unit tests that mock the Bedrock client. |
 
 ### 7.2 Trap guards
 
 - **Bootstrap is idempotent.** Run `bootstrap()` on an empty DB twice; assert no schema errors, no data loss.
-- **Dedup is correct.** Insert `agent_sources` row with `last_value = '72F'`. Run the writer with a new fetch returning `'72F'`. Assert no `agent_notifications` row inserted and no `last_posted_at` change.
-- **Dedup on real change.** Same setup, new fetch returns `'73F'`. Assert exactly one `agent_notifications` row, `last_value = '73F'`, `last_posted_at` updated.
+- **Dedup is correct.** Insert `agent_sources` row with `last_value = '72F'`. Run the writer with a new fetch returning `'72F'`. Assert no `agent_notifications` row inserted, no `last_posted_at` change, and the `MessageFormatter` was never invoked.
+- **Dedup on real change.** Same setup, new fetch returns `'73F'`. Assert exactly one `agent_notifications` row with `formatted_message` non-null, `last_value = '73F'`, `last_posted_at` updated.
 - **Partial-source failure doesn't poison the run.** Mock weather fetch to throw, crypto fetch to succeed. Assert the run row records the error, the notification is inserted, and the run outcome is `success`.
+- **LLM failure doesn't poison the run.** Mock weather formatter to throw, crypto formatter to succeed. Assert the weather notification is *not* inserted, the crypto notification *is*, and the run outcome is `success`. The Bedrock 5xx-then-retry path is covered by a separate unit test on the formatter.
 - **Conditional write 412 is honored.** Mock S3 to return 412 on `PutObject`. Assert no upload occurred and the previous version is untouched (verified by reading the local DB before the abort).
 - **Reader cache invalidation.** Set cached ETag to a value different from current. Assert a fresh `GetObject` happens. Set them equal; assert no `GetObject` happens.
 - **Closed vocabulary.** Insert `agent_sources(name = 'wether')` and assert CHECK constraint failure.
@@ -254,8 +278,7 @@ Deliberate. Not built, even where it appears to be the natural next step.
 
 - **A web dashboard.** The reader is a JSON endpoint (§2). A dashboard is a separate tutorial.
 - **Multi-tenancy, multiple Discord channels.** The tutorial targets one webhook. Configuration extension is left to the reader.
-- **Vector search, embeddings, semantic dedup.** Dedup is byte-for-byte equality on the source value. If "weather changed from 72F to 72.0F" should count as a change, that's a future tutorial's problem.
-- **LLM extraction, summarisation, "AI" anything.** The bot posts raw values. The point of the tutorial is the SQLite/S3 pattern, not the bot's intelligence.
+- **Vector search, embeddings, semantic dedup.** Dedup is byte-for-byte equality on the source value. If "weather changed from 72F to 72.0F" should count as a change, that's a future tutorial's problem. LLM output (the friendly message) is *not* used for dedup — only the raw fetched value is.
 - **A `social` retrieval profile, episodic tiers, ontology, outbox.** All `aws-cloud-agent`-specific concepts, all intentionally omitted.
 - **VPC, NAT Gateway, RDS, Aurora, DynamoDB.** A single SQLite file in S3 is the whole storage layer.
 - **Multi-region replication, cross-region disaster recovery.** Single-region, single-bucket.
@@ -272,10 +295,10 @@ Order matters: each phase produces a working artefact before the next begins. St
 
 | Phase | Deliverable | Verification |
 |---|---|---|
-| **1 — Local** | SQLite schema + `bootstrap()` + dedup logic + an in-memory `DiscordPoster` and `SourceFetcher`. A CLI script (`npm run local-fetch`) runs the writer end-to-end against `/tmp/memory.db`. No AWS. | Run the script; assert the DB has the right rows. Run `npm test`. |
+| **1 — Local** | SQLite schema + `bootstrap()` + dedup logic + an in-memory `DiscordPoster` and `SourceFetcher` + a `LocalTemplateFormatter` (no AWS). A CLI script (`npm run local-fetch`) runs the writer end-to-end against `/tmp/memory.db`. | Run the script; assert the DB has the right rows. Run `npm test`. |
 | **2 — S3 rehydration** | `S3Store` class: `get`, `put` (with `If-Match`), `head`. Bootstrap branch. Conditional write. Real S3 (or LocalStack) behind a config flag. | `npm run local-fetch -- --s3` hydrates from S3, runs, uploads; `npm run s3-fetch` does the same against a real bucket. |
-| **3 — Lambda** | Container image, CDK stack, EventBridge schedule, Function URL. Reserved concurrency 1. Single IAM role scoped to the one bucket. `scripts/deploy.sh`. | `npm run deploy`; `aws lambda invoke` against the deployed function for both ops; `scripts/smoke.sh` end-to-end. |
-| **4 — Reader + run logs** | `status` op, version cache, `agent_runs` populated on every invocation. `scripts/smoke.sh` extended to query status. | `curl <function-url> --data '{"op":"status"}'` returns the expected JSON. |
+| **3 — Lambda + Bedrock** | Container image, CDK stack, EventBridge schedule, Function URL, Bedrock IAM. Reserved concurrency 1. Single IAM role scoped to the one bucket and the one Bedrock model. `BedrockFormatter` swapped in via config (default `bedrockModelId`). `scripts/deploy.sh`. **One-time console prerequisite:** enable model access in the Bedrock console for the chosen `bedrockModelId` (§12). | `npm run deploy`; `aws lambda invoke` against the deployed function for both ops; `scripts/smoke.sh` end-to-end. |
+| **4 — Reader + run logs** | `status` op, version cache, `agent_runs` populated on every fetch invocation. `scripts/smoke.sh` extended to query status. | `curl <function-url> --data '{"op":"status"}'` returns the expected JSON, including `recentNotifications[].formattedMessage`. |
 
 The CDK deploy is in phase 3, not phase 1, because tutorial readers should be able to see the local behaviour before CDK enters the picture. Splitting phases this way also means `npm run deploy` is the *last* thing a reader does, not the first — which is the right order for understanding.
 
@@ -312,6 +335,10 @@ sqlite-s3-agent-tutorial/
 │   │   └── crypto.ts                # SourceFetcher implementation
 │   ├── discord/
 │   │   └── poster.ts                # DiscordPoster interface + impl
+│   ├── format/
+│   │   ├── index.ts                 # MessageFormatter interface
+│   │   ├── local.ts                 # LocalTemplateFormatter (Phase 1, no AWS)
+│   │   └── bedrock.ts               # BedrockFormatter (Phase 3, default)
 │   ├── agent/
 │   │   ├── fetch.ts                 # the writer op
 │   │   ├── status.ts                # the reader op
@@ -325,6 +352,8 @@ sqlite-s3-agent-tutorial/
 │   ├── fetch.test.ts
 │   ├── status.test.ts
 │   ├── s3.test.ts                   # with aws-sdk-client-mock
+│   ├── format.test.ts               # MessageFormatter contract (LocalTemplateFormatter)
+│   ├── bedrock.test.ts              # BedrockFormatter with aws-sdk-client-mock
 │   └── bootstrap.test.ts
 ├── Dockerfile                       # arm64 cross-compile block (§8.5 of aws-cloud-agent)
 ├── package.json
@@ -350,6 +379,11 @@ dbPath                        default /tmp/memory.db
 discordWebhookUrl             required; no default — the bot's destination
 sources                       JSON array; default ["weather","crypto"]; checked against schema CHK
 
+bedrockModelId                default zai.glm-4.7-flash
+                              resolved at load against the format family registry (§12); an unknown id fails startup, not first invoke
+bedrockRegion                 default us-east-1; must agree with the IAM resource ARN scope (§12) — set explicitly if region changes
+bedrockMaxOutputTokens        default 512 — a friendly message is short; capping it prevents runaway Converse responses on a misconfigured prompt
+
 reservedConcurrency           default 1
 ```
 
@@ -360,3 +394,67 @@ Two things are deliberately *not* in here.
 **The external API keys.** Weather and crypto APIs that need keys should read them from their own env vars at fetch time, not from a global config. The tutorial will use key-free public endpoints (`wttr.in`, `coingecko`) for the demo; readers plugging in a paid API extend the fetcher interface, not the config.
 
 **What the config validates, it validates at load.** `snapshotBucket` throws when absent rather than defaulting; `sources` rejects anything outside the closed vocabulary; numeric variables that don't parse throw naming themselves. Each of these turns what would otherwise be an opaque runtime failure into a startup error that says what to fix.
+
+---
+
+## 12. Bedrock setup
+
+The single Bedrock call in the writer (§3.1 step 5d-i) requires four things to line up before the first deploy succeeds. Each is below, named in the order it will trip up a tutorial reader who skips them.
+
+### 12.1 Model access (one-time console action)
+
+The Bedrock console's *Model access* page controls which model ids are invocable from this AWS account in this region. Until access is granted, `bedrock:InvokeModel` returns `AccessDeniedException` regardless of IAM — and IAM is permissive by default in this tutorial, so the failure mode is "deploys fine, breaks on first invoke."
+
+For the default `zai.glm-4.7-flash`: navigate to *Bedrock → Model access* in `us-east-1`, find the *Z.AI* provider, tick *GLM 4.7 Flash*, save. No EULA is required for Z.AI models.
+
+For Anthropic models (alternative): same page; *Anthropic* → tick the chosen Claude model → accept the EULA in the same dialog. EULA acceptance is recorded against the AWS account and persists across deploys.
+
+`cdk deploy` succeeds without this step (IAM is permissive); the failure surfaces only at first `fetch` invoke, which is the worst possible place to learn about model access. The tutorial walks through this *before* the first deploy.
+
+### 12.2 IAM (auto-provisioned by CDK)
+
+The CDK stack grants the Lambda role `bedrock:InvokeModel` + `bedrock:Converse` on the foundation-model ARN for the configured `bedrockModelId` family. No manual IAM step is required — the CDK pattern is selected from the family at synth time and the resource ARN narrows to match.
+
+| Family | Resource ARN pattern |
+|---|---|
+| `zai` (default) | `arn:aws:bedrock:us-east-1::foundation-model/zai.glm-4.7-flash` |
+| `amazon.nova` (bare) | `arn:aws:bedrock:us-east-1::foundation-model/amazon.nova-*` |
+| `amazon.nova` (`us.`) | `arn:aws:bedrock:us-east-1:${account}:inference-profile/us.amazon.nova-*` + foundation-model ARN |
+| `anthropic.claude` (`global.`) | `arn:aws:bedrock:us-east-1:${account}:inference-profile/global.anthropic.claude-*` + wildcard-region foundation-model ARN |
+
+Picking a model whose family the stack does not know produces a *narrower* IAM grant than intended; the failure is `AccessDeniedException` at first invoke. This is the deliberate alternative to a wildcard grant — the tutorial teaches least privilege, not convenience.
+
+### 12.3 Inference-profile prefix
+
+Each model family accepts a specific set of prefixes on its id (`global.`, `us.`, or bare):
+
+| Family | Default prefix | Other valid |
+|---|---|---|
+| `zai` | bare (`zai.glm-4.7-flash`) | — |
+| `amazon.nova` | bare | `us.` |
+| `anthropic.claude` | `global.` | `us.` |
+
+The `format` family registry (`src/format/index.ts`) resolves the base id to a family at load time, validates the prefix, and rejects mismatches with a *startup error* rather than a runtime `ResourceNotFoundException` on every `fetch`. Configuring `bedrockModelId` with a prefix already in it is also rejected at load — the prefix is supplied by the family, not the user.
+
+### 12.4 Runtime failure modes
+
+Each Bedrock exception maps to one recovery action; the `Converse` wrapper in `BedrockFormatter` adds the fully qualified id, the region, and the family to the message so the failure is self-locating.
+
+| Bedrock exception | Meaning | Recovery |
+|---|---|---|
+| `AccessDeniedException` | Model access not granted (§12.1), or IAM ARN does not cover the configured id. | §12.1 first; if access is enabled, the §12.2 pattern does not match the family. |
+| `ValidationException` | Request body used an unsupported field (almost always a registry entry added without a live probe). | Re-probe the model against Bedrock before changing the registry. |
+| `ResourceNotFoundException` | The composed id (with prefix) does not exist in the region. | Check `bedrockModelId` is the *base* id — no prefix; the prefix is added by the registry. |
+| `ThrottlingException` / 5xx | Transient. | One retry (~500ms), two failures skip the post (§6). |
+
+### 12.5 Swapping the model
+
+1. Pick a model id from the Bedrock catalog.
+2. Enable it in *Model access* (§12.1) — including EULA acceptance for Anthropic.
+3. Update `bedrockModelId` in `src/config.ts` (or env).
+4. If the family is not `zai`, add a registry entry — *only after a live probe* of accepted prefixes and request shape. The probe procedure is documented in the sibling repo (`aws-cloud-agent/docs/superpowers/specs/2026-08-02-model-provider-adapter-design.md` §5). The four-step procedure is mandatory, including the negative control: some families accept unknown request fields silently, so "the request did not 400" is not evidence a field is supported.
+5. Re-run `cdk synth` and `cdk deploy` — the IAM grant narrows or widens to match the new family.
+
+### 12.6 Cost reference
+
+`zai.glm-4.7-flash` at $0.07 / $0.40 per 1M tokens (us-east-1, standard on-demand). Each `fetch` invocation that produces a notification spends roughly 50–100 input tokens and 60–100 output tokens, or ~$0.00005 per post. Annual cost at one post per day is under $0.02. Alternatives and their per-token costs are documented in `docs/bedrock-model-comparison.md` (the file is intentionally kept general-purpose, not sibling-project-specific).
