@@ -140,7 +140,7 @@ The reader keeps the last hydrated ETag in module scope. Each invocation:
 
 1. `HEAD s3://<bucket>/memory.db`. Capture current ETag.
 2. If module-scope ETag equals current ETag and `/tmp/memory.db` exists: open a read-only handle to the existing file.
-3. Else: close any open handle, `rm /tmp/memory.db`, `GetObject` → `/tmp/memory.db`, open a read-only handle, update module-scope ETag.
+3. Else: close any open handle, `rm /tmp/memory.db`, `GetObject` → `/tmp/memory.db`, open a read-only handle, update module-scope ETag. **If `GetObject` returns `NoSuchKey`** (no snapshot yet — `fetch` has never run successfully), return the empty-state JSON — `{ snapshotVersion: null, sources: [], recentNotifications: [] }` — without opening a handle. There is nothing to query until the writer has produced at least one snapshot.
 
 **Why close-and-reopen rather than reuse the open handle?** `better-sqlite3` keeps a page cache in memory. If the file on disk changes underneath an open handle, the cache describes a file that no longer exists — silently wrong answers, no error. The mechanism is the same one `aws-cloud-agent` uses for the same reason.
 
