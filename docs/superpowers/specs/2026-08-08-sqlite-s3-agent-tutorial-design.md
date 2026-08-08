@@ -64,6 +64,8 @@ One Lambda function, two ops, one S3 bucket, one SQLite file.
 
 **One function, two ops.** The Lambda reads `op` from the event payload (EventBridge → `fetch`, Function URL → `status`). The container image and role are identical.
 
+**EventBridge payload routing.** The schedule rule's `Input` target is configured as a constant JSON string `{"op": "fetch"}` — not a transformed event payload — so the handler reads `event.op` directly without having to unwrap EventBridge's `detail` envelope. A transformed input would still produce the same runtime behaviour, but a constant input is unambiguous and survives IAM-policy changes that affect EventBridge's wrapper shape.
+
 **`fetch` is the writer; `status` is the reader.** Both share `/tmp/memory.db`. The reader's job is to make the writer's state visible — without it, the only way to inspect the bot is `aws s3 cp` and `sqlite3`, which is bad tutorial UX. The reader is a JSON endpoint, not a UI: callers (`curl`, `aws lambda invoke`, browser address bar) see `sources[]` and `recentNotifications[]`, not a dashboard.
 
 **Single-writer invariant.** The function has `reservedConcurrency: 1`. Without it, two simultaneous `fetch` invocations could both hydrate the same version, both upload, and silently overwrite each other's writes. The `status` op is read-only by IAM (`s3:GetObject` only, no `s3:PutObject`), so the writer's state is safe even though it shares the role.
@@ -220,6 +222,8 @@ Categorised, with the right response for each. The reader of the tutorial should
 
 Tests run against a **real SQLite file** with a real `better-sqlite3` handle — no mocks of the database. `aws-cloud-agent`'s design calls this out explicitly ("the library's actual behaviour is the thing under test") and the tutorial adopts the same principle. Network boundaries are mocked because Discord and external APIs are out of our control.
 
+**Runner and scripts.** The test runner is Vitest. `npm test` invokes `vitest run` via the `test` script in `package.json`; `vitest.config.ts` (see §10) is the runner config. The same script is what `npm run local-fetch` and the phases in §9 reference — the reader's CLI experience matches the text without any runner translation in between.
+
 ### 7.1 What we mock, what we don't
 
 | Boundary | Mocked? | How |
@@ -275,6 +279,8 @@ Order matters: each phase produces a working artefact before the next begins. St
 | **4 — Reader + run logs** | `status` op, version cache, `agent_runs` populated on every invocation. `scripts/smoke.sh` extended to query status. | `curl <function-url> --data '{"op":"status"}'` returns the expected JSON. |
 
 The CDK deploy is in phase 3, not phase 1, because tutorial readers should be able to see the local behaviour before CDK enters the picture. Splitting phases this way also means `npm run deploy` is the *last* thing a reader does, not the first — which is the right order for understanding.
+
+**CDK cleanup ergonomics.** The bucket declared in `infra/stack.ts` is configured with `RemovalPolicy.DESTROY` *and* `autoDeleteObjects: true` so that `cdk destroy` succeeds even when the bucket contains the SQLite snapshot. Without `autoDeleteObjects`, CloudFormation refuses to delete a non-empty bucket and the stack is orphaned; readers running `cdk destroy` to avoid lingering costs would have to manually `aws s3 rm` the snapshot first. Both flags are tutorial-quality defaults — production code generally wants `RemovalPolicy.RETAIN` and explicit lifecycle ownership — and the spec documents this delta explicitly so the choice is not read as carelessness.
 
 ---
 
