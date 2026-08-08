@@ -75,4 +75,27 @@ describe('loadConfig — S3 and Bedrock fields', () => {
     const config = loadConfig({ ...base, BEDROCK_MODEL_ID: 'amazon.nova-lite-v1:0' });
     expect(config.bedrockModelId).toBe('amazon.nova-lite-v1:0');
   });
+
+  it('accepts a positive integer for BEDROCK_MAX_OUTPUT_TOKENS', () => {
+    const config = loadConfig({ ...base, BEDROCK_MAX_OUTPUT_TOKENS: '1024' });
+    expect(config.bedrockMaxOutputTokens).toBe(1024);
+  });
+
+  it('rejects zero for BEDROCK_MAX_OUTPUT_TOKENS', () => {
+    expect(() => loadConfig({ ...base, BEDROCK_MAX_OUTPUT_TOKENS: '0' })).toThrow(
+      /BEDROCK_MAX_OUTPUT_TOKENS.*positive integer/,
+    );
+  });
+
+  it('rejects a negative value for BEDROCK_MAX_OUTPUT_TOKENS', () => {
+    expect(() => loadConfig({ ...base, BEDROCK_MAX_OUTPUT_TOKENS: '-1' })).toThrow(
+      /BEDROCK_MAX_OUTPUT_TOKENS.*positive integer/,
+    );
+  });
+
+  it('rejects a fractional value for BEDROCK_MAX_OUTPUT_TOKENS', () => {
+    expect(() => loadConfig({ ...base, BEDROCK_MAX_OUTPUT_TOKENS: '1.5' })).toThrow(
+      /BEDROCK_MAX_OUTPUT_TOKENS.*positive integer/,
+    );
+  });
 });

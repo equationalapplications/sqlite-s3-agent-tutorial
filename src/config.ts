@@ -47,6 +47,21 @@ function num(env: Env, key: string, fallback: number): number {
   return parsed;
 }
 
+/**
+ * Like `num`, but additionally rejects values that are not positive integers. Used for
+ * Bedrock's `maxTokens` (Bedrock Converse API: integer ≥ 1, fractional/zero/negative
+ * values are rejected at first invoke rather than at startup).
+ */
+function posInt(env: Env, key: string, fallback: number): number {
+  const raw = env[key];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`Environment variable ${key} must be a positive integer, got: ${raw}`);
+  }
+  return parsed;
+}
+
 function sources(env: Env): readonly SourceName[] {
   const raw = env.SOURCES;
   if (raw === undefined || raw.trim() === '') {
@@ -92,7 +107,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
 
     bedrockModelId,
     bedrockRegion: str(env, 'BEDROCK_REGION', 'us-east-1'),
-    bedrockMaxOutputTokens: num(env, 'BEDROCK_MAX_OUTPUT_TOKENS', 512),
+    bedrockMaxOutputTokens: posInt(env, 'BEDROCK_MAX_OUTPUT_TOKENS', 512),
 
     reservedConcurrency: num(env, 'RESERVED_CONCURRENCY', 1),
   });

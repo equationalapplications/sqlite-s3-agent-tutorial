@@ -14,10 +14,10 @@ echo "=== Building TypeScript ==="
 npm run build
 
 echo "=== Synthesising ==="
-npx cdk synth --app "npx tsx infra/stack.ts" --profile "$PROFILE"
+npx cdk synth --app "npx tsx infra/stack.ts" --profile "$PROFILE" --region "$REGION"
 
 echo "=== Deploying ==="
-npx cdk deploy --app "npx tsx infra/stack.ts" --profile "$PROFILE" --require-approval never
+npx cdk deploy --app "npx tsx infra/stack.ts" --profile "$PROFILE" --region "$REGION" --require-approval never
 
 echo "=== Deployment complete ==="
 aws cloudformation describe-stacks \

@@ -16,7 +16,7 @@ RUN npm ci
 COPY tsconfig.json tsconfig.check.json ./
 COPY src/ src/
 
-RUN npm run build
+RUN npm run build && npm prune --omit=dev
 
 # ---- runtime stage (arm64) ----
 FROM node:24-bookworm-slim AS runtime

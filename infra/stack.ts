@@ -64,7 +64,7 @@ class AgentStack extends cdk.Stack {
       // Single-writer invariant (spec §2): without this, two overlapping `fetch`
       // invocations could both hydrate the same version and silently overwrite each
       // other's writes. Reader-overridable via RESERVED_CONCURRENCY env at synth time.
-      reservedConcurrentExecutions: parseInt(process.env.RESERVED_CONCURRENCY ?? '1', 10),
+      reservedConcurrentExecutions: parseReservedConcurrency(process.env.RESERVED_CONCURRENCY),
       logGroup,
       environment,
     });
@@ -148,6 +148,24 @@ function buildBedrockResources(bedrockModelId: string, region: string): string[]
       `buildBedrockResources. Add a branch here matching the entry added to ` +
       `src/format/families.ts.`,
   );
+}
+
+/**
+ * Parses the `RESERVED_CONCURRENCY` env var. Unset → 1. Set but blank/whitespace → 1.
+ * Set to a non-negative safe integer → that value. Anything else (negative, fractional,
+ * partial parse, garbage) → throws. The Lambda service rejects reserved concurrency
+ * outside `[0, 2^53 - 1]`, and `parseInt` accepts partial strings like `"2workers"` as 2,
+ * which would silently break the single-writer invariant.
+ */
+function parseReservedConcurrency(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 1;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0 || !Number.isSafeInteger(parsed)) {
+    throw new Error(
+      `RESERVED_CONCURRENCY must be a non-negative safe integer, got: ${JSON.stringify(raw)}`,
+    );
+  }
+  return parsed;
 }
 
 // ---- App entry point ----

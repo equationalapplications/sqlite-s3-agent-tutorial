@@ -76,16 +76,27 @@ describe('S3Store', () => {
       expect(calls[0]?.args[0].input?.IfMatch).toBe('"abc123"');
     });
 
-    it('omits If-Match when ifMatch is null (bootstrap put)', async () => {
+    it('sends IfNoneMatch: "*" when ifMatch is null (bootstrap put)', async () => {
       s3.on(PutObjectCommand).resolves({ ETag: '"abc123"' });
       await store.put('memory.db', Buffer.from('data'), null);
 
       const calls = s3.commandCalls(PutObjectCommand);
       expect(calls[0]?.args[0].input?.IfMatch).toBeUndefined();
+      expect(calls[0]?.args[0].input?.IfNoneMatch).toBe('*');
     });
 
     it('throws PreconditionFailedError on 412', async () => {
       s3.on(PutObjectCommand).rejects({ name: 'PreconditionFailed' });
+      await expect(
+        store.put('memory.db', Buffer.from('data'), '"abc123"'),
+      ).rejects.toThrow(PreconditionFailedError);
+    });
+
+    it('throws PreconditionFailedError on NoSuchKey for a conditional update', async () => {
+      // S3 returns NoSuchKey when a conditional update targets a missing object — the
+      // precondition cannot hold against something that doesn't exist. Same domain
+      // error as a 412: the object is not in the state the writer expected.
+      s3.on(PutObjectCommand).rejects({ name: 'NoSuchKey' });
       await expect(
         store.put('memory.db', Buffer.from('data'), '"abc123"'),
       ).rejects.toThrow(PreconditionFailedError);

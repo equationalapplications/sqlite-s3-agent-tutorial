@@ -29,9 +29,11 @@ function isPreconditionFailed(error: unknown): boolean {
 
 /**
  * `Store` backed by S3 (spec §4.2). The `ifMatch: string | null` contract is translated
- * to S3's wire semantics here and nowhere else: `null` omits the `If-Match` header
- * entirely (a bootstrap put — there is no prior version to match against), a non-null
- * value becomes `If-Match: <etag>`. Callers never see this translation.
+ * to S3's wire semantics here and nowhere else: `null` sends `IfNoneMatch: '*'`, a
+ * conditional create that fails if the key already exists; a non-null value sends
+ * `IfMatch: <etag>`, a conditional update that fails if the current etag doesn't match.
+ * Both branches are conditional — we never issue an unconditional overwrite. Callers
+ * never see this translation.
  */
 export function createS3Store(options: S3StoreOptions): Store {
   return {
@@ -71,12 +73,15 @@ export function createS3Store(options: S3StoreOptions): Store {
             Key: key,
             Body: body,
             ContentType: 'application/vnd.sqlite3',
-            ...(ifMatch === null ? {} : { IfMatch: ifMatch }),
+            ...(ifMatch === null ? { IfNoneMatch: '*' } : { IfMatch: ifMatch }),
           }),
         );
         return { etag: response.ETag ?? '' };
       } catch (error: unknown) {
-        if (isPreconditionFailed(error)) {
+        // S3 returns PreconditionFailed for an etag mismatch on a conditional update
+        // and NoSuchKey when a conditional update targets a missing object. Both map
+        // to the same domain error: the precondition did not hold.
+        if (isPreconditionFailed(error) || isNoSuchKey(error)) {
           throw new PreconditionFailedError();
         }
         throw error;
