@@ -12,7 +12,11 @@ STACK_NAME="SqliteS3AgentTutorial"
 FETCH_RESPONSE_FILE=$(mktemp)
 NETRC_FILE=$(mktemp)
 chmod 600 "$NETRC_FILE"
-trap 'rm -f "$FETCH_RESPONSE_FILE" "$NETRC_FILE"' EXIT
+# Populated below when the resolved credentials carry a SessionToken; kept off the
+# process command line (visible in `ps aux` for the curl lifetime) by writing the
+# header to a 0600 tempfile and letting curl read it via `--header "@file"`.
+SECURITY_TOKEN_HEADER_FILE=""
+trap 'rm -f "$FETCH_RESPONSE_FILE" "$NETRC_FILE" ${SECURITY_TOKEN_HEADER_FILE:+"$SECURITY_TOKEN_HEADER_FILE"}' EXIT
 
 echo "=== Fetching stack outputs ==="
 outputs=$(aws cloudformation describe-stacks \
@@ -69,7 +73,11 @@ printf 'machine %s login %s password %s\n' \
 
 curl_headers=(--header "Content-Type: application/json")
 if [ -n "$session_token" ]; then
-  curl_headers+=(--header "X-Amz-Security-Token: $session_token")
+  SECURITY_TOKEN_HEADER_FILE=$(mktemp)
+  chmod 600 "$SECURITY_TOKEN_HEADER_FILE"
+  printf 'X-Amz-Security-Token: %s\n' "$session_token" \
+    > "$SECURITY_TOKEN_HEADER_FILE"
+  curl_headers+=(--header "@$SECURITY_TOKEN_HEADER_FILE")
 fi
 
 status_response=$(curl -s --aws-sigv4 "aws:amz:$REGION:lambda" \
@@ -81,7 +89,7 @@ status_response=$(curl -s --aws-sigv4 "aws:amz:$REGION:lambda" \
 echo "$status_response" | jq .
 
 weather_present=$(echo "$status_response" | jq '.sources[] | select(.name == "weather") | .lastValue')
-if [ -z "$weather_present" ]; then
+if [ -z "$weather_present" ] || [ "$weather_present" = "null" ]; then
   echo "FAIL: no weather source with a lastValue in status response" >&2
   exit 1
 fi
