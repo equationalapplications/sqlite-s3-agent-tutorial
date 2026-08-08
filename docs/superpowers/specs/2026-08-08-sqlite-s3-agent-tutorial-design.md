@@ -1,7 +1,7 @@
 # SQLite S3 Agent Tutorial — Design
 
 **Date:** 2026-08-08
-**Status:** Draft (awaiting user review)
+**Status:** Approved (ready for implementation planning)
 **Scope:** Public tutorial teaching the SQLite-backed-by-S3 pattern for a stateful AWS agent, by way of a working Discord notification bot.
 
 ---
