@@ -84,4 +84,27 @@ describe('openDatabase', () => {
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('enables foreign keys per connection (agent_notifications.source FK enforced)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-test-'));
+    const path = join(dir, 'memory.db');
+
+    const db = openDatabase(path);
+    bootstrap(db);
+    expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
+
+    // Inserting a notification for a source that doesn't exist in agent_sources must
+    // fail with a FOREIGN KEY constraint violation — not silently succeed.
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO agent_notifications (source, value, formatted_message, posted_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run('weather', '72F', 'Weather update: 72F', 1000),
+    ).toThrow(/FOREIGN KEY constraint failed/);
+
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

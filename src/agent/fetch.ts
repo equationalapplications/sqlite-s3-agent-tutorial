@@ -119,9 +119,12 @@ export async function runFetch(params: RunFetchParams): Promise<RunFetchResult> 
   db.close();
 
   // Step 7: conditional publish. A PreconditionFailedError here is an abort, not a
-  // per-source failure (spec §4.2) — the run row is updated to outcome: 'error' before
-  // the error propagates, so the abort is visible in agent_runs even though the snapshot
-  // holding that row was never uploaded.
+  // per-source failure (spec §4.2). The local DB is updated to outcome: 'error' before
+  // the error propagates, but because the conditional write failed, this update only
+  // lives in `/tmp/memory.db` and is never persisted to the store. The next invocation
+  // hydrates the prior snapshot and won't see this row — the error is recorded for
+  // postmortem (a debugger reading the local file or the in-process logs) but is not
+  // visible to a fresh reader.
   const body = readFileSync(params.dbPath);
   try {
     await params.store.put(params.storeKey, body, priorEtag);

@@ -1,7 +1,21 @@
 # Bedrock model comparison (us-east-1)
 
-Reference for picking/repointing `low`/`med`/`high` tier models (`src/config.ts`
-`TIER_DEFAULTS`). Update this table when tiers change or when re-probing.
+> **Provenance.** This file is research from a sibling project (`aws-cloud-agent`,
+> `@equationalapplications/core-llm-wiki`) where `low`/`med`/`high` tier switching and a
+> `TIER_DEFAULTS` constant live in `src/config.ts`. It is kept in this PR as background
+> reading for PR2/PR3's `BedrockFormatter` work — **not** because this tutorial defines
+> those tiers. The tutorial's actual Bedrock configuration surface is the single
+> `bedrockModelId` field documented in `docs/superpowers/specs/2026-08-08-sqlite-s3-agent-tutorial-design.md`
+> §11 (default `zai.glm-4.7-flash`).
+>
+> References to `src/judge/assess.ts`, `infra/stack.ts`, `MAX_TOKENS_MED`, `doRunHeal`,
+> `maintain`, `g3UntypedFacts`, and the `src/bedrock/families.ts` family registry all
+> belong to the sibling project and do not exist in this repo.
+
+Reference for picking/repointing tier models in the sibling project. Update this table
+when tiers change or when re-probing. For this tutorial, start with the recommended
+`med`/`low` pick below (`zai.glm-4.7-flash`) and revisit only if Bedrock integration
+(`PR2`) needs a different model.
 
 **Methodology:** prices are pulled from the AWS Pricing API
 (`aws pricing list-price-lists` / `get-price-list-file-url`, `AmazonBedrock` service code,

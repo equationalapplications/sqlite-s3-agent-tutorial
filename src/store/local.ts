@@ -1,6 +1,6 @@
-import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, existsSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { PreconditionFailedError, type Store } from './types.js';
 
 function etagOf(body: Buffer): string {
@@ -10,10 +10,16 @@ function etagOf(body: Buffer): string {
 /** `Store` backed by a directory on disk. Mirrors S3's `If-Match` semantics locally so
  *  Phase 1 and Phase 2 exercise the same conditional-write contract (spec §9, Phase 2). */
 export function createLocalStore(dir: string): Store {
-  mkdirSync(dir, { recursive: true });
+  const root = resolve(dir);
+  mkdirSync(root, { recursive: true });
+  const rootWithSep = root.endsWith(sep) ? root : root + sep;
 
   function pathFor(key: string): string {
-    return join(dir, key);
+    const path = resolve(join(root, key));
+    if (path !== root && !path.startsWith(rootWithSep)) {
+      throw new Error(`LocalStore: key ${JSON.stringify(key)} escapes store directory`);
+    }
+    return path;
   }
 
   return {
@@ -48,7 +54,23 @@ export function createLocalStore(dir: string): Store {
         }
       }
 
-      writeFileSync(path, body);
+      // Atomic write: stage to a sibling temp file in the same directory, then rename.
+      // POSIX rename is atomic within a filesystem, so a crash mid-write leaves the
+      // previous snapshot intact (or the new one fully present) — never a truncated
+      // file. Mirrors S3's server-side atomicity for parity between phases.
+      const tmpPath = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+      try {
+        writeFileSync(tmpPath, body);
+        renameSync(tmpPath, path);
+      } catch (error: unknown) {
+        // Best-effort cleanup so temp files don't accumulate if rename fails.
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          // ignore — leave the temp file visible for postmortem if it can't be removed
+        }
+        throw error;
+      }
       return { etag: etagOf(body) };
     },
   };
