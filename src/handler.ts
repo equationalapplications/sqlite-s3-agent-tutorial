@@ -2,6 +2,7 @@
 import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { S3Client } from '@aws-sdk/client-s3';
 import { runFetch } from './agent/fetch.js';
+import { createStatusReader, type StatusReader } from './agent/status.js';
 import { loadConfig } from './config.js';
 import { createFetchDiscordPoster } from './discord/poster.js';
 import { createBedrockFormatter } from './format/bedrock.js';
@@ -27,6 +28,23 @@ export interface LambdaResult {
 export interface InjectedClients {
   s3Client?: S3Client;
   bedrockClient?: BedrockRuntimeClient;
+}
+
+/**
+ * Module-scope, keyed by dbPath: the Lambda runtime may reuse the container across
+ * invocations, so the reader's hydration cache (spec §4.3) must survive warm
+ * invocations — recreating it per call would re-download the snapshot on every request
+ * regardless of whether its ETag changed.
+ */
+const statusReaders = new Map<string, StatusReader>();
+
+function getStatusReader(dbPath: string): StatusReader {
+  let reader = statusReaders.get(dbPath);
+  if (reader === undefined) {
+    reader = createStatusReader(dbPath);
+    statusReaders.set(dbPath, reader);
+  }
+  return reader;
 }
 
 /**
@@ -74,8 +92,11 @@ export async function runHandler(
   const config = loadConfig(env);
 
   if (op === 'status') {
-    // PR3 implements the reader op (spec §9 Phase 4).
-    return { statusCode: 501, body: JSON.stringify({ error: 'status op not yet implemented' }) };
+    const s3Client = clients.s3Client ?? new S3Client({ region: config.region, maxAttempts: 3 });
+    const store = createS3Store({ client: s3Client, bucket: config.snapshotBucket });
+    const reader = getStatusReader(config.dbPath);
+    const result = await reader.getStatus(store, config.snapshotKey);
+    return { statusCode: 200, body: JSON.stringify(result) };
   }
 
   const s3Client = clients.s3Client ?? new S3Client({ region: config.region, maxAttempts: 3 });
