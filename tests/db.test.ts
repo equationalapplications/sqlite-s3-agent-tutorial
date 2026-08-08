@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { bootstrap } from '../src/db/bootstrap.js';
-import { openDatabase } from '../src/db/open.js';
+import { openDatabase, openReadOnlyDatabase } from '../src/db/open.js';
 import { AGENT_DDL, SOURCE_NAMES } from '../src/db/schema.js';
 
 describe('schema DDL', () => {
@@ -105,6 +105,25 @@ describe('openDatabase', () => {
     ).toThrow(/FOREIGN KEY constraint failed/);
 
     db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('openReadOnlyDatabase', () => {
+  it('opens an existing file without allowing writes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-test-'));
+    const path = join(dir, 'memory.db');
+
+    const writable = openDatabase(path);
+    bootstrap(writable);
+    writable.close();
+
+    const readOnly = openReadOnlyDatabase(path);
+    expect(() =>
+      readOnly.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run(),
+    ).toThrow(/readonly/i);
+
+    readOnly.close();
     rmSync(dir, { recursive: true, force: true });
   });
 });
