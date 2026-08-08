@@ -47,10 +47,26 @@ class AgentStack extends cdk.Stack {
 
     // ---- Lambda function (one image, one function, both ops) ----
 
+    // loadConfig requires DISCORD_WEBHOOK_URL (spec §11). Reading it here at synth time
+    // surfaces the missing-credential failure at `npm run deploy`, not on the first
+    // scheduled fetch 24 hours later — the worst place to discover it. Production code
+    // would source the URL from SSM Parameter Store; for the tutorial, an env var is the
+    // simplest path and the deploy script already exports it.
+    const discordWebhookUrl = process.env.DISCORD_WEBHOOK_URL;
+    if (discordWebhookUrl === undefined || discordWebhookUrl === '') {
+      throw new Error(
+        'DISCORD_WEBHOOK_URL must be set in the deploy environment. ' +
+          '`loadConfig` requires it at runtime, so the CDK stack wires it into the ' +
+          'Lambda environment at synth time (export DISCORD_WEBHOOK_URL=... before ' +
+          '`npm run deploy`).',
+      );
+    }
+
     const environment: Record<string, string> = {
       SNAPSHOT_BUCKET: bucket.bucketName,
       BEDROCK_MODEL_ID: bedrockModelId,
       BEDROCK_REGION: this.region,
+      DISCORD_WEBHOOK_URL: discordWebhookUrl,
       NODE_OPTIONS: '--enable-source-maps',
     };
 
@@ -127,7 +143,10 @@ function buildBedrockResources(bedrockModelId: string, region: string): string[]
   const account = cdk.Aws.ACCOUNT_ID;
 
   if (bedrockModelId.startsWith('zai.')) {
-    return [`arn:aws:bedrock:${region}::foundation-model/zai.*`];
+    // Narrow to the configured model id (spec §12.2): a `zai.*` wildcard would be
+    // broader than the tutorial's least-privilege intent and would also silently grant
+    // access to any future zai models added to this account/region.
+    return [`arn:aws:bedrock:${region}::foundation-model/${bedrockModelId}`];
   }
   if (bedrockModelId.startsWith('amazon.nova-')) {
     return [

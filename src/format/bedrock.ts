@@ -1,5 +1,6 @@
 import { type BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 import type { SourceName } from '../db/schema.js';
+import { resolveFamily } from './families.js';
 import type { MessageFormatter } from './types.js';
 
 export interface BedrockFormatterOptions {
@@ -10,6 +11,21 @@ export interface BedrockFormatterOptions {
 }
 
 const RETRY_DELAY_MS = 500;
+
+/**
+ * Composes the wire id from the configured base id and the family's default prefix
+ * (spec §12.3). The base id alone is not always valid: `anthropic.claude-*` requires
+ * a `global.` (or `us.`) inference-profile prefix, and bare-form `amazon.nova-*` does
+ * not. `zai.*` accepts the bare form (empty prefix), so for the default model this is
+ * a no-op. `resolveFamily` is called again here (after `loadConfig` validates it at
+ * startup) so the formatter owns the prefix-composition step rather than requiring
+ * `loadConfig` to pre-compose.
+ */
+function composedModelId(baseModelId: string): string {
+  const family = resolveFamily(baseModelId);
+  const prefix = family.prefixes[0] ?? '';
+  return `${prefix}${baseModelId}`;
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,7 +90,7 @@ export function createBedrockFormatter(options: BedrockFormatterOptions): Messag
   async function attempt(source: SourceName, rawValue: string): Promise<string> {
     const response = await options.client.send(
       new ConverseCommand({
-        modelId: options.modelId,
+        modelId: composedModelId(options.modelId),
         system: [{ text: SYSTEM_PROMPT }],
         messages: [{ role: 'user', content: [{ text: buildUserPrompt(source, rawValue) }] }],
         inferenceConfig: { maxTokens: options.maxOutputTokens },

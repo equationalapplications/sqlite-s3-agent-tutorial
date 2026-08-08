@@ -108,5 +108,12 @@ describe('S3Store', () => {
         store.put('memory.db', Buffer.from('data'), '"abc123"'),
       ).rejects.toThrow('AccessDenied');
     });
+
+    it('throws when the response has no ETag', async () => {
+      s3.on(PutObjectCommand).resolves({});
+      await expect(
+        store.put('memory.db', Buffer.from('data'), '"abc123"'),
+      ).rejects.toThrow(/no ETag/);
+    });
   });
 });

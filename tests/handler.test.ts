@@ -77,4 +77,25 @@ describe('runHandler', () => {
     const result = await runHandler({ op: 'bogus' }, env);
     expect(result.statusCode).toBe(400);
   });
+
+  it('parses op from event.body when called via a Function URL invocation', async () => {
+    const env = {
+      DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+      SNAPSHOT_BUCKET: 'test-bucket',
+    };
+
+    // Lambda Function URLs deliver the HTTP request body as a string under `event.body`.
+    const result = await runHandler({ body: '{"op":"status"}' }, env);
+    expect(result.statusCode).toBe(501);
+  });
+
+  it('returns 400 when the Function URL body is not valid JSON', async () => {
+    const env = {
+      DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+      SNAPSHOT_BUCKET: 'test-bucket',
+    };
+
+    const result = await runHandler({ body: 'not json' }, env);
+    expect(result.statusCode).toBe(400);
+  });
 });

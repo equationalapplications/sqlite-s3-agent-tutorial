@@ -28,6 +28,19 @@ function isPreconditionFailed(error: unknown): boolean {
 }
 
 /**
+ * Extracts an ETag from an S3 response, failing fast when missing or empty. The Store
+ * contract depends on every etag being usable as the next `ifMatch` value; a missing
+ * or empty etag would silently produce `If-Match: ""`, which surfaces as a confusing
+ * 412 from the next call. Better to throw at the read site than poison downstream.
+ */
+function requireEtag(op: string, key: string, etag: string | undefined): string {
+  if (etag === undefined || etag === '') {
+    throw new Error(`S3 ${op} for ${key} returned no ETag; Store contract requires one`);
+  }
+  return etag;
+}
+
+/**
  * `Store` backed by S3 (spec §4.2). The `ifMatch: string | null` contract is translated
  * to S3's wire semantics here and nowhere else: `null` sends `IfNoneMatch: '*'`, a
  * conditional create that fails if the key already exists; a non-null value sends
@@ -42,7 +55,7 @@ export function createS3Store(options: S3StoreOptions): Store {
         const response = await options.client.send(
           new HeadObjectCommand({ Bucket: options.bucket, Key: key }),
         );
-        return { etag: response.ETag ?? '' };
+        return { etag: requireEtag('HeadObject', key, response.ETag) };
       } catch (error: unknown) {
         if (isNotFound(error)) return null;
         throw error;
@@ -58,7 +71,7 @@ export function createS3Store(options: S3StoreOptions): Store {
         if (body === undefined) {
           throw new Error(`S3 object ${key} has no body`);
         }
-        return { etag: response.ETag ?? '', body: Buffer.from(body) };
+        return { etag: requireEtag('GetObject', key, response.ETag), body: Buffer.from(body) };
       } catch (error: unknown) {
         if (isNoSuchKey(error)) return null;
         throw error;
@@ -76,7 +89,7 @@ export function createS3Store(options: S3StoreOptions): Store {
             ...(ifMatch === null ? { IfNoneMatch: '*' } : { IfMatch: ifMatch }),
           }),
         );
-        return { etag: response.ETag ?? '' };
+        return { etag: requireEtag('PutObject', key, response.ETag) };
       } catch (error: unknown) {
         // S3 returns PreconditionFailed for an etag mismatch on a conditional update
         // and NoSuchKey when a conditional update targets a missing object. Both map

@@ -1,6 +1,6 @@
 import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 import { mockClient } from 'aws-sdk-client-mock';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createBedrockFormatter } from '../src/format/bedrock.js';
 
 const bedrock = mockClient(BedrockRuntimeClient);
@@ -40,6 +40,27 @@ describe('createBedrockFormatter', () => {
 
     const calls = bedrock.commandCalls(ConverseCommand);
     expect(calls[0]?.args[0].input?.modelId).toBe('zai.glm-4.7-flash');
+  });
+
+  it('prepends the family default inference-profile prefix (anthropic.claude → global.)', async () => {
+    // spec §12.3: anthropic.claude-* requires a `global.` (or `us.`) inference-profile
+    // prefix. Without it, Bedrock returns ResourceNotFoundException even when the base
+    // id is valid. The base id is configured; the prefix is supplied by the family.
+    bedrock.on(ConverseCommand).resolves(textResponse('from claude'));
+
+    const formatter = createBedrockFormatter({
+      client,
+      modelId: 'anthropic.claude-haiku-4-5-20251001-v1:0',
+      region: 'us-east-1',
+      maxOutputTokens: 512,
+    });
+
+    await formatter.format('weather', '72F');
+
+    const calls = bedrock.commandCalls(ConverseCommand);
+    expect(calls[0]?.args[0].input?.modelId).toBe(
+      'global.anthropic.claude-haiku-4-5-20251001-v1:0',
+    );
   });
 
   it('throws a descriptive error on AccessDeniedException', async () => {

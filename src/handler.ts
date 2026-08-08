@@ -9,8 +9,14 @@ import { createSourceFetcher } from './sources/index.js';
 import type { SourceFetcher, SourceName } from './sources/types.js';
 import { createS3Store } from './store/s3.js';
 
+/**
+ * Lambda invocation payload (spec §2). EventBridge delivers `{ op: 'fetch' }` directly;
+ * Function URL invocations deliver the same JSON as a string under `body`. `op` is
+ * optional here because the source may be either field — `resolveOp` picks one.
+ */
 export interface HandlerEvent {
-  op: string;
+  op?: string;
+  body?: string;
 }
 
 export interface LambdaResult {
@@ -21,6 +27,25 @@ export interface LambdaResult {
 export interface InjectedClients {
   s3Client?: S3Client;
   bedrockClient?: BedrockRuntimeClient;
+}
+
+/**
+ * Extracts `op` from the two event shapes the function accepts:
+ *   - EventBridge-style: `{ op: 'fetch' }` (op is a top-level field).
+ *   - Function URL-style: `{ body: '{"op":"status"}' }` (op is JSON inside the HTTP body).
+ * Returns `undefined` when neither yields a string — the caller maps that to 400.
+ */
+function resolveOp(event: HandlerEvent): string | undefined {
+  if (event.op !== undefined) return event.op;
+  if (event.body !== undefined && event.body !== '') {
+    try {
+      const parsed = JSON.parse(event.body) as { op?: unknown };
+      if (typeof parsed.op === 'string') return parsed.op;
+    } catch {
+      // body wasn't JSON; fall through and return undefined
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -37,13 +62,14 @@ export async function runHandler(
   clients: InjectedClients = {},
   sourceOverrides: Partial<Record<SourceName, () => Promise<string>>> = {},
 ): Promise<LambdaResult> {
-  if (event.op !== 'fetch' && event.op !== 'status') {
-    return { statusCode: 400, body: JSON.stringify({ error: `Unknown op: ${event.op}` }) };
+  const op = resolveOp(event);
+  if (op !== 'fetch' && op !== 'status') {
+    return { statusCode: 400, body: JSON.stringify({ error: `Unknown op: ${op ?? 'undefined'}` }) };
   }
 
   const config = loadConfig(env);
 
-  if (event.op === 'status') {
+  if (op === 'status') {
     // PR3 implements the reader op (spec §9 Phase 4).
     return { statusCode: 501, body: JSON.stringify({ error: 'status op not yet implemented' }) };
   }
