@@ -34,9 +34,13 @@ export interface InjectedClients {
  *   - EventBridge-style: `{ op: 'fetch' }` (op is a top-level field).
  *   - Function URL-style: `{ body: '{"op":"status"}' }` (op is JSON inside the HTTP body).
  * Returns `undefined` when neither yields a string — the caller maps that to 400.
+ *
+ * Guarded with `typeof === 'string'` so a non-string `event.op` (e.g. an HTTP client
+ * that posts `{op: 42}` or `{op: {name: 'fetch'}}`) falls through to body parsing /
+ * the 400 path rather than being passed through as a non-string op.
  */
 function resolveOp(event: HandlerEvent): string | undefined {
-  if (event.op !== undefined) return event.op;
+  if (typeof event.op === 'string') return event.op;
   if (event.body !== undefined && event.body !== '') {
     try {
       const parsed = JSON.parse(event.body) as { op?: unknown };

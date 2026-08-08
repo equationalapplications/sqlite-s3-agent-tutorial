@@ -156,7 +156,7 @@ function buildBedrockResources(bedrockModelId: string, region: string): string[]
   }
   if (bedrockModelId.startsWith('anthropic.claude-')) {
     return [
-      `arn:aws:bedrock:*::foundation-model/anthropic.claude-*`,
+      `arn:aws:bedrock:${region}::foundation-model/anthropic.claude-*`,
       `arn:aws:bedrock:${region}:${account}:inference-profile/global.anthropic.claude-*`,
       `arn:aws:bedrock:${region}:${account}:inference-profile/us.anthropic.claude-*`,
     ];

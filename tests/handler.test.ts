@@ -78,6 +78,35 @@ describe('runHandler', () => {
     expect(result.statusCode).toBe(400);
   });
 
+  it('falls through to body parsing when event.op is not a string', async () => {
+    // resolveOp must not pass a non-string event.op through as the resolved op —
+    // a hostile Function URL client posting `{op: 42}` or `{op: {name: 'fetch'}}`
+    // would otherwise undermine the typed string contract. Falling through to the
+    // body (or to the 400 path) keeps behaviour predictable.
+    const env = {
+      DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+      SNAPSHOT_BUCKET: 'test-bucket',
+    };
+
+    const result = await runHandler(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      { op: 42 as any, body: '{"op":"status"}' },
+      env,
+    );
+    expect(result.statusCode).toBe(501); // status op (parsed from body)
+  });
+
+  it('returns 400 when event.op is a non-string and the body is empty', async () => {
+    const env = {
+      DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+      SNAPSHOT_BUCKET: 'test-bucket',
+    };
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await runHandler({ op: 42 as any }, env);
+    expect(result.statusCode).toBe(400);
+  });
+
   it('parses op from event.body when called via a Function URL invocation', async () => {
     const env = {
       DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',

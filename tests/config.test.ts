@@ -98,4 +98,26 @@ describe('loadConfig — S3 and Bedrock fields', () => {
       /BEDROCK_MAX_OUTPUT_TOKENS.*positive integer/,
     );
   });
+
+  it('rejects a negative value for RESERVED_CONCURRENCY', () => {
+    expect(() => loadConfig({ ...base, RESERVED_CONCURRENCY: '-1' })).toThrow(
+      /RESERVED_CONCURRENCY.*non-negative safe integer/,
+    );
+  });
+
+  it('rejects a fractional value for RESERVED_CONCURRENCY', () => {
+    expect(() => loadConfig({ ...base, RESERVED_CONCURRENCY: '1.5' })).toThrow(
+      /RESERVED_CONCURRENCY.*non-negative safe integer/,
+    );
+  });
+
+  it('defaults bedrockRegion to AWS_REGION when BEDROCK_REGION is unset', () => {
+    // Without this, deploying with CDK_DEFAULT_REGION=eu-west-1 but leaving BEDROCK_REGION
+    // unset would point the Bedrock client at us-east-1 while IAM grants the eu-west-1
+    // resource ARN — first invoke hits AccessDeniedException. Tracking the runtime
+    // region keeps client + IAM scope in agreement without two env vars to keep in lockstep.
+    const config = loadConfig({ ...base, AWS_REGION: 'eu-west-1' });
+    expect(config.region).toBe('eu-west-1');
+    expect(config.bedrockRegion).toBe('eu-west-1');
+  });
 });
