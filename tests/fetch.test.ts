@@ -3,7 +3,6 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import Database from 'better-sqlite3';
 import { bootstrap } from '../src/db/bootstrap.js';
 import { openDatabase } from '../src/db/open.js';
 import { createLocalStore } from '../src/store/local.js';
