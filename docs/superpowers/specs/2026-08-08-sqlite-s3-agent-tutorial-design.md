@@ -81,14 +81,14 @@ One Lambda function, two ops, one S3 bucket, one SQLite file.
     - 404 → bootstrap branch (§4.1)
     - 200 → /tmp/memory.db, capture ETag
 2.  better-sqlite3 open /tmp/memory.db (WAL, immutable=false)
-3.  bootstrap() — CREATE TABLE IF NOT EXISTS sources, notifications, runs (§5)
+3.  bootstrap() — CREATE TABLE IF NOT EXISTS agent_sources, agent_notifications, agent_runs (§5)
 4.  BEGIN; INSERT agent_runs (run_id, op='fetch', snapshot_version_in, started_at); COMMIT
 5.  For each configured source (e.g. weather, crypto):
     a. Fetch external value (HTTPS GET via SourceFetcher)
-    b. Read sources.last_value for this source
-    c. If new value == last_value, skip (no Discord post, no notification row)
-    d. Else: format message; POST to Discord webhook; on 2xx, INSERT notification;
-       UPDATE sources SET last_value = ?, last_posted_at = ?
+    b. Read agent_sources.last_value for this source
+    c. If new value == last_value, skip (no Discord post, no agent_notifications row)
+    d. Else: format message; POST to Discord webhook; on 2xx, INSERT agent_notifications;
+       UPDATE agent_sources SET last_value = ?, last_posted_at = ?
 6.  UPDATE agent_runs SET ended_at, outcome, sources_checked, notifications_sent, error
 7.  S3 PutObject to s3://<bucket>/memory.db with If-Match: <ETag>
     - 412 PreconditionFailed → log, abort, leave old version authoritative
@@ -122,18 +122,17 @@ When `S3.GetObject` returns `NoSuchKey`:
 
 1. Open `/tmp/memory.db` with `better-sqlite3`. Empty file.
 2. Run `bootstrap()`: create the three tables (§5). Idempotent.
-3. Capture ETag as a sentinel `*` for the conditional write (4.2).
-4. Continue the normal write flow.
+3. Continue the normal write flow with `null` as the `ifMatch` argument to `Store.put` (§4.2) — there is no prior version to match against.
 
 On subsequent runs, `S3.GetObject` returns 200 and bootstrap is skipped. The branch exists to make `npm run deploy` succeed on day one without a manual `aws s3 cp` step.
 
 ### 4.2 Conditional write (writer's PUT)
 
-The writer's `PUT` uses `If-Match: <ETag>` captured during `GetObject`:
+The writer calls `Store.put(key, body, ifMatch)`. The `ifMatch` argument is the only place where S3's HTTP semantics enter the picture — and even there they are contained: `S3Store` translates the argument into the appropriate header on the wire, and the writer never sees that translation.
 
-- **200 OK** → success. Capture the new ETag for the run record.
+- **Normal case (`ifMatch: <ETag>`)** → `S3Store` sends `If-Match: <ETag>` (the ETag captured during the corresponding `GetObject`). 200 OK → success, capture the new ETag for the run record.
+- **Bootstrap case (`ifMatch: null`)** → `S3Store` omits the `If-Match` header on the wire. S3 treats the request as a fresh put, creating the object. `null` is the bootstrap indicator inside the agent's domain: it carries the same intent that a `*` wire-sentinel would, but it stays inside `S3Store` instead of leaking into the agent code.
 - **412 Precondition Failed** → another writer committed while this one worked. **Abort loudly, do not retry.** A blind retry would re-fetch from the external API and re-post to Discord against a stale base. Since `reservedConcurrency: 1` makes this race impossible, 412 means a misconfiguration or an out-of-band write — either way, fail is the correct response.
-- **Bootstrap case** → the bootstrap branch omits `IfMatch` entirely; S3 treats it as a fresh put. The `*` sentinel only governs the *caching* of "no prior version," not the wire format.
 
 ### 4.3 Version-cached read (reader's hydration)
 
