@@ -9,16 +9,16 @@ import { createSourceFetcher } from './sources/index.js';
 import type { SourceFetcher, SourceName } from './sources/types.js';
 import { createS3Store } from './store/s3.js';
 
-interface HandlerEvent {
+export interface HandlerEvent {
   op: string;
 }
 
-interface LambdaResult {
+export interface LambdaResult {
   statusCode: number;
   body?: string;
 }
 
-interface InjectedClients {
+export interface InjectedClients {
   s3Client?: S3Client;
   bedrockClient?: BedrockRuntimeClient;
 }
