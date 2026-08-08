@@ -50,6 +50,7 @@ class AgentStack extends cdk.Stack {
     const environment: Record<string, string> = {
       SNAPSHOT_BUCKET: bucket.bucketName,
       BEDROCK_MODEL_ID: bedrockModelId,
+      BEDROCK_REGION: this.region,
       NODE_OPTIONS: '--enable-source-maps',
     };
 
@@ -62,8 +63,8 @@ class AgentStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       // Single-writer invariant (spec §2): without this, two overlapping `fetch`
       // invocations could both hydrate the same version and silently overwrite each
-      // other's writes.
-      reservedConcurrentExecutions: 1,
+      // other's writes. Reader-overridable via RESERVED_CONCURRENCY env at synth time.
+      reservedConcurrentExecutions: parseInt(process.env.RESERVED_CONCURRENCY ?? '1', 10),
       logGroup,
       environment,
     });
@@ -81,8 +82,12 @@ class AgentStack extends cdk.Stack {
 
     // ---- Function URL (status reads, PR3 completes the op) ----
 
+    // Tutorial readers hit this URL with curl or a browser (spec §2 architecture
+    // diagram: "HTTP client (curl, browser)" → Function URL with no auth). AWS_IAM
+    // would require SigV4 signing and break the simplest case. The `status` op is
+    // wired up in PR3; revisit auth then if readers need access control.
     const functionUrl = agentFunction.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.AWS_IAM,
+      authType: lambda.FunctionUrlAuthType.NONE,
     });
 
     // ---- EventBridge schedule (op: fetch, once a day) ----
@@ -95,6 +100,10 @@ class AgentStack extends cdk.Stack {
       targets: [
         new targets.LambdaFunction(agentFunction, {
           event: events.RuleTargetInput.fromObject({ op: 'fetch' }),
+          // Spec §6: EventBridge retries on invocation failure are disabled for this op
+          // — the failure is informational, not transient. Without this, CDK's default
+          // is 185 retries over ~24 hours, and a 412 from Store.put would replay.
+          retryAttempts: 0,
         }),
       ],
     });
