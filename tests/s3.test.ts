@@ -102,6 +102,16 @@ describe('S3Store', () => {
       ).rejects.toThrow(PreconditionFailedError);
     });
 
+    it('throws PreconditionFailedError on ConditionalRequestConflict (409)', async () => {
+      // S3 returns 409 when a concurrent operation (e.g. an out-of-band delete) races
+      // the conditional write. Same abort-loudly response as 412: the previous
+      // snapshot stays authoritative, and the writer must not retry — see spec §6.
+      s3.on(PutObjectCommand).rejects({ name: 'ConditionalRequestConflict' });
+      await expect(
+        store.put('memory.db', Buffer.from('data'), '"abc123"'),
+      ).rejects.toThrow(PreconditionFailedError);
+    });
+
     it('propagates non-412 errors', async () => {
       s3.on(PutObjectCommand).rejects(new Error('AccessDenied'));
       await expect(

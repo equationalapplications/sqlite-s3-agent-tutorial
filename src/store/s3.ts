@@ -27,6 +27,14 @@ function isPreconditionFailed(error: unknown): boolean {
   );
 }
 
+function isConditionalRequestConflict(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { name?: string }).name === 'ConditionalRequestConflict'
+  );
+}
+
 /**
  * Extracts an ETag from an S3 response, failing fast when missing or empty. The Store
  * contract depends on every etag being usable as the next `ifMatch` value; a missing
@@ -91,10 +99,16 @@ export function createS3Store(options: S3StoreOptions): Store {
         );
         return { etag: requireEtag('PutObject', key, response.ETag) };
       } catch (error: unknown) {
-        // S3 returns PreconditionFailed for an etag mismatch on a conditional update
-        // and NoSuchKey when a conditional update targets a missing object. Both map
-        // to the same domain error: the precondition did not hold.
-        if (isPreconditionFailed(error) || isNoSuchKey(error)) {
+        // S3 returns three distinct errors when a conditional write cannot land:
+        //   PreconditionFailed (412)        — etag mismatch on a conditional update
+        //   NoSuchKey (404)                  — conditional update targets a missing object
+        //   ConditionalRequestConflict (409) — a concurrent operation raced the write
+        // (e.g. a delete arriving mid-put). All three mean "the precondition did not hold,
+        // and the previous snapshot stays authoritative" — per spec §6 the writer must
+        // abort loudly and never retry. reservedConcurrency: 1 makes a real race
+        // impossible, so any of these surfacing is a misconfiguration or out-of-band
+        // write; the right response is the same in all three cases.
+        if (isPreconditionFailed(error) || isNoSuchKey(error) || isConditionalRequestConflict(error)) {
           throw new PreconditionFailedError();
         }
         throw error;
