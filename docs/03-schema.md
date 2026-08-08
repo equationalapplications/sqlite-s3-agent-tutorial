@@ -21,6 +21,9 @@ CREATE TABLE agent_notifications (
   FOREIGN KEY (source) REFERENCES agent_sources(name) ON DELETE CASCADE
 );
 
+CREATE INDEX idx_agent_notifications_source_posted_at
+  ON agent_notifications(source, posted_at DESC);
+
 CREATE TABLE agent_runs (
   run_id TEXT PRIMARY KEY,
   op TEXT NOT NULL,
@@ -30,7 +33,9 @@ CREATE TABLE agent_runs (
   outcome TEXT,
   sources_checked INTEGER,
   notifications_sent INTEGER,
-  error TEXT
+  error TEXT,
+  CONSTRAINT chk_op      CHECK (op IN ('fetch', 'status')),
+  CONSTRAINT chk_outcome CHECK (outcome IS NULL OR outcome IN ('success', 'error'))
 );
 ```
 

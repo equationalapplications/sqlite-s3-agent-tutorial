@@ -23,9 +23,12 @@ write with `412 Precondition Failed` instead of silently clobbering it.
 
 The bootstrap case is the one exception: there's no prior etag to match against, because
 there's no prior object. The `Store` interface models this with `ifMatch: string | null` —
-`null` means "omit the `If-Match` header; this is a fresh put." That keeps S3's HTTP
-semantics contained inside `S3Store`; the writer's orchestration code never sees a header,
-just a `string | null`.
+`null` means "this is a fresh put, fail if the key already exists." `S3Store` translates
+that to an `If-None-Match: "*"` conditional create on the wire, not an unconditioned
+overwrite: if a concurrent deployment or `aws s3 cp` has materialized the object since
+this invocation started, S3 rejects the PUT with a 409 and the writer surfaces the same
+loud failure a 412 would. That keeps S3's HTTP semantics contained inside `S3Store`; the
+writer's orchestration code never sees a header, just a `string | null`.
 
 On a 412, the writer does not retry. A blind retry would mean re-fetching from the
 external weather/crypto API and re-posting to Discord against a snapshot that's already
@@ -62,16 +65,19 @@ first is what prevents that.
 
 ## Bedrock setup
 
-Before the first `fetch` invocation can succeed, grant model access for the configured
-`bedrockModelId` (default `zai.glm-4.7-flash`) in the Bedrock console:
-*Bedrock → Model access* in `us-east-1`, find *Z.AI*, tick *GLM 4.7 Flash*, save. No EULA
-required for Z.AI models — Anthropic models require accepting one on the same page.
+Before the first `fetch` invocation can succeed, the deploying account in `us-east-1` needs
+two things: an active AWS Marketplace subscription for the configured `bedrockModelId`
+(default `zai.glm-4.7-flash`), and an IAM policy that grants `bedrock:InvokeModel` against
+it. Bedrock enables foundation-model access by default in commercial Regions once the
+Marketplace subscription is in place — the legacy manual *Bedrock → Model access* console
+flow is no longer the gating step for this model. If you point `bedrockModelId` at an
+Anthropic model instead, Bedrock requires a separate first-time-use EULA acceptance on the
+same page before that model will invoke; that step *is* still a manual console action and
+is the one remaining reason to open the *Model access* screen.
 
-This is a one-time, per-account, per-region setting, and it's independent of IAM: `cdk
-deploy` succeeds with or without it, because the CDK stack's IAM policy is generated at
-synth time from the configured model's family (see `src/format/families.ts`) and is
-already permissive enough. Model access is a separate gate Amazon added on top of IAM, and
-until it's granted, `bedrock:InvokeModel` returns `AccessDeniedException` regardless of
-what your IAM policy says. Skipping this step means the stack deploys cleanly and the
-first `fetch` fails — which is why this tutorial calls it out before the first deploy
-rather than after.
+The CDK stack's IAM policy is generated at synth time from the configured model's family
+(see `src/format/families.ts`) and is permissive enough to invoke the chosen model — but a
+Marketplace subscription must already exist on the account, or `bedrock:InvokeModel`
+returns `AccessDeniedException` regardless of what the IAM policy says. `cdk deploy` does
+not check for the subscription, so the stack deploys cleanly and the first `fetch` fails —
+which is why this tutorial calls it out before the first deploy rather than after.

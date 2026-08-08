@@ -23,9 +23,12 @@ npm run deploy
 npm run smoke
 ```
 
-Before your first deploy, grant model access for `zai.glm-4.7-flash` in the Bedrock
-console (`us-east-1` → Bedrock → Model access) — see [docs/02-rehydration.md](docs/02-rehydration.md#bedrock-setup)
-for why this step exists and what breaks if you skip it.
+Before your first deploy, ensure your AWS account in `us-east-1` has an active AWS
+Marketplace subscription for `zai.glm-4.7-flash` (Bedrock enables foundation-model access
+by default in commercial Regions once the Marketplace subscription is in place; the legacy
+manual *Bedrock → Model access* console flow is no longer the gate for this model) — see
+[docs/02-rehydration.md](docs/02-rehydration.md#bedrock-setup) for what else is required and
+what breaks if you skip it.
 
 ## What's here
 
