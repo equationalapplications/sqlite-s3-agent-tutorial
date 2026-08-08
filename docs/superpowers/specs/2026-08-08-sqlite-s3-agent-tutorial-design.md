@@ -199,14 +199,16 @@ Categorised, with the right response for each. The reader of the tutorial should
 
 | Failure | Where it surfaces | What we do |
 |---|---|---|
-| External API 4xx/5xx or timeout | per-source fetch | Skip that source. Record in `agent_runs.error`. Continue with other sources. The run still ends with `outcome = 'success'` if at least one source was checked without an *unrecoverable* error. |
-| Discord webhook 4xx | per-source post | Skip the `sources.last_posted_at` update and the `agent_notifications` insert for that source. The next run will retry. Recorded in `agent_runs.error`. |
-| Discord webhook 5xx | per-source post | Same as 4xx, but a single retry within the invocation (one retry, ~250ms backoff). Two failures → skip the source for this run. |
-| S3 conditional write 412 | step 7 of `fetch` | **Abort loudly.** Do not retry, do not upload, do not update the local DB further. The previous snapshot stays authoritative. EventBridge retries on invocation failure are disabled for this op — the failure is informational, not transient. |
+| External API 4xx/5xx or timeout | per-source fetch | Skip that source. Append a description to `agent_runs.error`. Continue with other sources. The run completes its loop and ends with `outcome = 'success'`; the per-source failures live in the `error` column. |
+| Discord webhook 4xx | per-source post | Skip the `sources.last_posted_at` update and the `agent_notifications` insert for that source. The next run will retry. Append to `agent_runs.error`. |
+| Discord webhook 5xx | per-source post | Same as 4xx, but a single retry within the invocation (one retry, ~250ms backoff). Two failures → skip the source for this run. Append to `agent_runs.error`. |
+| S3 conditional write 412 | step 7 of `fetch` | **Abort loudly.** Do not retry, do not upload, do not update the local DB further. The previous snapshot stays authoritative. Update the in-progress `agent_runs` row with `outcome = 'error'` and a description of the 412, then propagate. EventBridge retries on invocation failure are disabled for this op — the failure is informational, not transient. |
 | S3 `GetObject` 5xx (not 404) | step 1 of `fetch` | Bubble up. Lambda marks invocation failed. EventBridge retries with backoff. No `agent_runs` row is written (we never got far enough). |
 | Bootstrap error (S3 403, IAM) | step 1 of `fetch` | Bubble up. Clear configuration error, surfaced in CloudWatch. |
 | SQLite open / DDL error | step 2-3 of `fetch` | Bubble up. Previous snapshot is untouched. |
 | Reader cache stale (version changed) | step 3 of `status` | Close existing handle, re-download. Idempotent. |
+
+**`outcome = 'error'` is reserved for failures that abort the whole run after step 4** (i.e., after the `agent_runs` row has been inserted). Per-source failures inside the loop set `outcome = 'success'` and append to `agent_runs.error`; the run still completes its loop. Failures before step 4 bubble up and leave no `agent_runs` row — they appear in CloudWatch only.
 
 **The principle: every error category has exactly one right answer, and it's the same answer every time.** `aws-cloud-agent`'s design calls this out explicitly in its §6 prose; the tutorial does the same because it teaches a habit, not just a pattern.
 
