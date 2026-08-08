@@ -8,7 +8,10 @@ describe('loadConfig', () => {
   });
 
   it('applies defaults for dbPath and sources', () => {
-    const config = loadConfig({ DISCORD_WEBHOOK_URL: 'https://discord.example/webhook' });
+    const config = loadConfig({
+      DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+      SNAPSHOT_BUCKET: 'my-bucket',
+    });
     expect(config.dbPath).toBe('/tmp/memory.db');
     expect(config.sources).toEqual(['weather', 'crypto']);
     expect(config.discordWebhookUrl).toBe('https://discord.example/webhook');
@@ -17,6 +20,7 @@ describe('loadConfig', () => {
   it('parses a custom SOURCES env var', () => {
     const config = loadConfig({
       DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+      SNAPSHOT_BUCKET: 'my-bucket',
       SOURCES: '["weather"]',
     });
     expect(config.sources).toEqual(['weather']);
@@ -38,5 +42,37 @@ describe('loadConfig', () => {
         SOURCES: 'not json',
       }),
     ).toThrow(/SOURCES/);
+  });
+});
+
+describe('loadConfig — S3 and Bedrock fields', () => {
+  const base = { DISCORD_WEBHOOK_URL: 'https://discord.example/webhook', SNAPSHOT_BUCKET: 'my-bucket' };
+
+  it('throws when snapshotBucket is missing', () => {
+    expect(() => loadConfig({ DISCORD_WEBHOOK_URL: base.DISCORD_WEBHOOK_URL })).toThrow(
+      /SNAPSHOT_BUCKET/,
+    );
+  });
+
+  it('applies defaults for region, snapshotKey, bedrock fields', () => {
+    const config = loadConfig(base);
+    expect(config.region).toBe('us-east-1');
+    expect(config.snapshotBucket).toBe('my-bucket');
+    expect(config.snapshotKey).toBe('memory.db');
+    expect(config.bedrockModelId).toBe('zai.glm-4.7-flash');
+    expect(config.bedrockRegion).toBe('us-east-1');
+    expect(config.bedrockMaxOutputTokens).toBe(512);
+    expect(config.reservedConcurrency).toBe(1);
+  });
+
+  it('resolves bedrockModelId against the family registry at load, failing on an unknown id', () => {
+    expect(() => loadConfig({ ...base, BEDROCK_MODEL_ID: 'made-up.model-1' })).toThrow(
+      /no known model family/,
+    );
+  });
+
+  it('accepts an overridden bedrockModelId from a known family', () => {
+    const config = loadConfig({ ...base, BEDROCK_MODEL_ID: 'amazon.nova-lite-v1:0' });
+    expect(config.bedrockModelId).toBe('amazon.nova-lite-v1:0');
   });
 });
