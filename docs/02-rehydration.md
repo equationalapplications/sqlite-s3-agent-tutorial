@@ -43,12 +43,15 @@ against an unchanged snapshot. Re-downloading the whole SQLite file on every req
 work, but it's wasted I/O on a warm Lambda container that already has last version on
 disk.
 
-Instead, the reader keeps the last snapshot's S3 ETag in a module-scope variable — which
-survives across invocations on a warm container, because Lambda doesn't re-run module-level
-code on every invoke, only on cold starts. Each request does a cheap `HEAD` first. If the
-returned ETag matches what's cached and the local file still exists, the reader reuses its
-already-open SQLite handle. Only when the ETag differs does it close the old handle,
-delete the stale local file, download the new one, and open a fresh handle.
+Instead, the reader's state lives in a closure returned by `createStatusReader` — that
+closure holds the last snapshot's S3 ETag and the open read-only SQLite handle.
+`src/handler.ts` keeps a module-scope `Map<dbPath, StatusReader>` and looks up (or creates)
+one entry per `dbPath`. Because Lambda doesn't re-run module-level code on every invoke —
+only on cold starts — the Map, and therefore the reader instance it points at, survive
+warm invocations. Each request does a cheap `HEAD` first. If the returned ETag matches
+what's cached and the local file still exists, the reader reuses its already-open SQLite
+handle. Only when the ETag differs does it close the old handle, delete the stale local
+file, download the new one, and open a fresh handle.
 
 That "close, delete, re-download, reopen" sequence matters more than it looks: SQLite
 libraries like `better-sqlite3` keep an in-memory page cache tied to the open file
