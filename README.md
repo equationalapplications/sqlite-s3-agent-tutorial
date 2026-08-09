@@ -42,6 +42,32 @@ manual *Bedrock → Model access* console flow is no longer the gate for this mo
 [docs/02-rehydration.md](docs/02-rehydration.md#bedrock-setup) for what else is required and
 what breaks if you skip it.
 
+## Loop mode
+
+For local testing and quick iteration, the agent can run a 5-minute loop instead of
+the once-daily schedule. After the same `npm run deploy` as for the daily schedule,
+toggle the loop on and off directly from your shell — no Lambda invocation, no token,
+no extra IAM grants:
+
+```bash
+npm run loop-start   # calls `aws events enable-rule` on the deployed rule
+npm run loop-stop    # calls `aws events disable-rule` — no further ticks
+```
+
+While the loop is running, each tick posts one combined Discord message: a short
+friendly comment drawn from today's date, weather, and crypto price, ending with a
+haiku. If a past message in the corpus is close enough, the LLM's pre-suffix output
+is mechanically appended with a `Reminds me of: <past message>` line. Both scripts
+read the rule name from the `LoopRuleName` stack output and call the EventBridge API
+directly using the same AWS CLI credentials the smoke script already requires.
+
+**Stop the loop when you're done** — `loop-stop.sh` disables the EventBridge rule so
+no further invocations occur and the recurring AWS cost stops. Note: running
+`npm run deploy` after `loop-stop.sh` re-enables the rule, since the CDK stack
+declares it `enabled: true` — re-run `loop-stop.sh` after any redeploy if you want
+the loop to stay off. See [docs/07-budget-protection.md](docs/07-budget-protection.md)
+for the per-day Bedrock call rate at 5-min cadence.
+
 ## Triggering a fetch on demand
 
 The daily `fetch` run is normally EventBridge's job, but you can also trigger one over
