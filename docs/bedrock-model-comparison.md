@@ -1,10 +1,13 @@
 # Bedrock model comparison (us-east-1)
 
 > **Provenance.** This file is general-purpose Bedrock model research. Model pricing,
-> capability, and latency characteristics are not project-specific, so the file lives
-> here as a starting point for any reader picking a Bedrock model. Tier-switching
-> workflows that lean on this comparison as a building block are out of scope for this
-> tutorial.
+> capability, and latency characteristics are not project-specific, so the table below
+> is a starting point for any reader picking a Bedrock model. The tier recommendations
+> at the bottom of the file are tutorial-specific — they cover the `low`/`med`/`high`
+> tiers the tutorial uses. Adding a new tier or pointing an existing tier at a model
+> from a different family requires an entry in `src/format/families.ts` (verified by a
+> live probe with a negative control, not by reading model cards) and a matching
+> resource ARN in `infra/stack.ts`.
 
 Reference for picking a Bedrock model in any project. Update this table
 when pricing changes or when re-probing. For this tutorial, start with the recommended
@@ -101,8 +104,12 @@ rather than ranked by headline price.
 | C | Genuine supersession, detector correctly picked the older/lower-confidence side | `uphold` |
 
 Case C is the control: without it, a model biased toward `overturn` scores well on B by luck.
-Plus an ingest test against a document chunk using a typical ingest prompt
-(INGEST_SYSTEM_PROMPT-style).
+Plus an ingest test against a document chunk using a typical ingest prompt —
+treated as a **synthetic proxy** rather than a measurement of this tutorial's
+real request. The tutorial's `INGEST_SYSTEM_PROMPT` itself is too tightly bound to
+the writer's schema to reuse as a generic benchmark, so the proxy is used only to
+sanity-check output-token counts; the application-specific ingest cost row is
+explicitly **excluded** from the recommendations below.
 
 **Every candidate was run at least 3 times.** This mattered — see Nemotron Super below.
 
@@ -176,7 +183,7 @@ rather than a single figure.
 - GLM 4.7 Flash is a small MoE model. The `doRunHeal` prompt (a full fact dump) is materially
   harder than anything tested here. If heal quality regresses, GLM 4.7 (non-Flash, $0.60/$2.20)
   is the natural fallback — same family, same request shape, 3/3 on these cases.
-- Adopting these requires new `zai` and `deepseek` family entries in `src/bedrock/families.ts`
+- Adopting these requires new `zai` and `deepseek` family entries in `src/format/families.ts`
   and matching resource ARNs in `infra/stack.ts`, or invocation fails with AccessDenied.
 
 ## Anthropic models (kept for future reference — not currently in use)

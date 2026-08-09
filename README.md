@@ -21,6 +21,9 @@ real thing:
 
 ```bash
 export AWS_PROFILE=your-profile
+# Source the webhook URL from an untracked file rather than echoing it inline —
+# `infra/stack.ts` reads DISCORD_WEBHOOK_URL at synth time and throws if it is unset.
+set -a; . ./.env.discord; set +a   # .env.discord is gitignored
 npm run deploy
 npm run smoke
 ```

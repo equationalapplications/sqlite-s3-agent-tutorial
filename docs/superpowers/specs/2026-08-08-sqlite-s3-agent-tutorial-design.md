@@ -169,10 +169,10 @@ The reader's `ReaderState` has two fields — `cachedEtag` and `db` — and exac
 - `(cachedEtag: <string>, db: <open handle>)` — the cache holds a valid snapshot.
 - `(cachedEtag: null, db: undefined)` — the cache is empty.
 
-Any other combination is a bug. The cache-miss branch must preserve this invariant across every failure mode:
+Any other combination is a bug. The cache-miss branch transitions to `(null, undefined)` at entry (when it closes the prior open handle) and only restores `(string, open handle)` after `openReadOnlyDatabase` succeeds. This makes the invariant hold across every failure mode:
 
-- **`openReadOnlyDatabase` throws** (corrupted snapshot, non-SQLite bytes, disk error): `state.db` stays `undefined`, `state.cachedEtag` stays at its prior value (or `null` on a cold start). The error propagates up — the Lambda returns 500, the next call retries the cache-miss path from scratch.
-- **`GetObject` returns `null` after a successful `HEAD`** (transient S3 race, object deleted between calls): `state.cachedEtag` is reset to `null`, the empty-state JSON is returned. The next call retries cleanly.
+- **`openReadOnlyDatabase` throws** (corrupted snapshot, non-SQLite bytes, disk error), or **`rmSync` / `writeFileSync` / `store.get` throws**: the cache was already cleared at the top of the branch, so `state.db` is `undefined` and `state.cachedEtag` is `null`. The error propagates up — the Lambda returns 500, the next call retries the cache-miss path from a known-empty state.
+- **`GetObject` returns `null` after a successful `HEAD`** (transient S3 race, object deleted between calls): the cache was already cleared at the top of the branch, so the empty-state JSON is returned and the next call retries cleanly.
 - **`GetObject` returns `NoSuchKey`** (no snapshot yet — `fetch` has never run): identical to the `null` case above.
 
 The retry loop on a permanently broken S3 object is unavoidable — it terminates when the operator or the writer fixes the underlying object. The invariant is what prevents the loop from behaving incorrectly (e.g., returning stale data from a closed handle) while it runs.

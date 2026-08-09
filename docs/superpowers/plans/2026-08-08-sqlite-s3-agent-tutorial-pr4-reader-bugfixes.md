@@ -14,7 +14,7 @@
 
 ## File Structure (changes to PR3)
 
-```
+```text
 sqlite-s3-agent-tutorial/
 ├── docs/
 │   ├── 01-architecture.md            # MODIFY: remove aws-cloud-agent reference
@@ -32,7 +32,8 @@ sqlite-s3-agent-tutorial/
 │                                                                       references
 ├── src/
 │   ├── agent/
-│   │   └── status.ts                 # MODIFY: swap order; reset cachedEtag on GET-null
+│   │   └── status.ts                 # MODIFY: clear both cache fields at branch entry;
+│   │                                           only assign new pair after open succeeds
 │   └── format/
 │       └── families.ts                # MODIFY: remove aws-cloud-agent reference
 └── tests/
@@ -46,23 +47,39 @@ sqlite-s3-agent-tutorial/
 **Files:**
 - Modify: `src/agent/status.ts`
 
-**Bug:** `src/agent/status.ts:119-120` assigns `state.cachedEtag = object.etag` *before* `state.db = openReadOnlyDatabase(dbPath)`. If `openReadOnlyDatabase` throws (corrupted snapshot, non-SQLite bytes, disk-full-mid-write), `state.cachedEtag` is left holding the new ETag while `state.db` stays `undefined`. This violates the invariant the spec describes in §4.3.1 (added in Task 4).
+**Bug:** `src/agent/status.ts` (warm-cache-miss branch) clears `state.db` (close the old handle, set `state.db = undefined`) but leaves `state.cachedEtag` at the prior valid ETag. From that point, every step before `openReadOnlyDatabase` succeeds (`rmSync`, `store.get`, `writeFileSync`, `openReadOnlyDatabase`) can throw and leave the cache in the invalid `(oldEtag, undefined)` combination. The earlier "swap order" fix only addressed the case where `openReadOnlyDatabase` is the failing step — a partial failure in any earlier step still violates the spec's §4.3.1 invariant.
 
-**Fix:** Swap the order. Assign `state.db` first; only assign `state.cachedEtag` after `openReadOnlyDatabase` succeeds. On failure, `state.cachedEtag` stays at its prior value (or `null` on a cold start) and `state.db` stays `undefined`, which is the same state the reader was in before the call.
+**Fix:** Clear both fields together at the top of the cache-miss branch (right after closing the old handle), then only assign the new pair at the end after `openReadOnlyDatabase` succeeds. The branch now transitions to `(null, undefined)` at entry and only returns to `(string, open handle)` on success — every throwing step preserves the empty-cache state. The GET-null branch's earlier `state.cachedEtag = null` becomes redundant but harmless.
 
 - [ ] **Step 1: Modify `src/agent/status.ts`**
 
-In `src/agent/status.ts`, replace the three lines:
+In `src/agent/status.ts`, replace the cache-miss branch (lines 97-128):
 
 ```typescript
-        writeFileSync(dbPath, object.body);
-        state.cachedEtag = object.etag;
-        state.db = openReadOnlyDatabase(dbPath);
-```
+      if (!cacheHit) {
+        // `better-sqlite3` keeps a page cache in memory; if the file on disk changes
+        // underneath an open handle, the cache describes a file that no longer exists —
+        // silently wrong answers, no error. Close before overwriting (spec §4.3).
+        if (state.db !== undefined) {
+          state.db.close();
+          state.db = undefined;
+        }
+        // `force: true` makes the delete robust against the file disappearing between the
+        // existsSync check and the rmSync call — `/tmp` is shared with the writer, and
+        // `/tmp` cleanup can race us too. With `force` the no-op case is harmless.
+        rmSync(dbPath, { force: true });
 
-with:
+        const object = await store.get(storeKey);
+        if (object === null) {
+          // HEAD succeeded but GET raced a delete between the two calls — treat as
+          // no-snapshot rather than throwing, since the outcome the caller cares about
+          // (nothing to query) is identical to the head === null branch above.
+          // Reset cachedEtag so the next call retries cleanly rather than leaving
+          // (cachedEtag=oldEtag, db=undefined), an invalid state per spec §4.3.1.
+          state.cachedEtag = null;
+          return { snapshotVersion: null, sources: [], recentNotifications: [] };
+        }
 
-```typescript
         writeFileSync(dbPath, object.body);
         // Assign cachedEtag only after openReadOnlyDatabase succeeds — if open throws,
         // cachedEtag stays at its prior value (or null) and the next call retries cleanly
@@ -70,6 +87,47 @@ with:
         // spec §4.3.1.
         state.db = openReadOnlyDatabase(dbPath);
         state.cachedEtag = object.etag;
+      }
+```
+
+with:
+
+```typescript
+      if (!cacheHit) {
+        // `better-sqlite3` keeps a page cache in memory; if the file on disk changes
+        // underneath an open handle, the cache describes a file that no longer exists —
+        // silently wrong answers, no error. Close before overwriting (spec §4.3).
+        // Clear both fields together so a partial failure (rmSync, store.get, write,
+        // openReadOnlyDatabase throwing) leaves the cache in the empty-cache state
+        // `(null, undefined)` rather than the invalid `(oldEtag, undefined)`. Only the
+        // successful open at the end of this branch restores the populated state.
+        if (state.db !== undefined) {
+          state.db.close();
+        }
+        state.db = undefined;
+        state.cachedEtag = null;
+        // `force: true` makes the delete robust against the file disappearing between the
+        // existsSync check and the rmSync call — `/tmp` is shared with the writer, and
+        // `/tmp` cleanup can race us too. With `force` the no-op case is harmless.
+        rmSync(dbPath, { force: true });
+
+        const object = await store.get(storeKey);
+        if (object === null) {
+          // HEAD succeeded but GET raced a delete between the two calls — treat as
+          // no-snapshot rather than throwing, since the outcome the caller cares about
+          // (nothing to query) is identical to the head === null branch above. cachedEtag
+          // was already cleared at the top of this branch, so the next call retries the
+          // full cache-miss path from a known-empty state (spec §4.3.1).
+          return { snapshotVersion: null, sources: [], recentNotifications: [] };
+        }
+
+        writeFileSync(dbPath, object.body);
+        // Assign cachedEtag only after openReadOnlyDatabase succeeds — any throw between
+        // here and the top of the branch (rmSync, store.get, writeFileSync, open) leaves
+        // the cache in `(null, undefined)` per spec §4.3.1.
+        state.db = openReadOnlyDatabase(dbPath);
+        state.cachedEtag = object.etag;
+      }
 ```
 
 - [ ] **Step 2: Verify the type-check passes**
@@ -700,7 +758,7 @@ with:
 
 - [ ] **Step 5: Verify no remaining `aws-cloud-agent` references in non-plan files**
 
-Run: `grep -rn "aws-cloud-agent\|core-llm-wiki" --exclude-dir=node_modules --exclude-dir=.git --exclude="*-plan*.md" .`
+Run: `grep -rn "aws-cloud-agent\|core-llm-wiki" --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=docs/superpowers/plans .`
 Expected: no output.
 
 ---
@@ -751,20 +809,32 @@ discussion.
 
 ## Step 4: Configure the tutorial
 
-Set the URL as the `DISCORD_WEBHOOK_URL` environment variable when running locally:
+Export the URL as the `DISCORD_WEBHOOK_URL` environment variable before running
+locally — the value stays out of shell history if you set it in your shell profile
+or load it from an untracked `.env` file:
 
 ```bash
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." npm run local-fetch
+# Local development — load from an untracked .env (gitignored), then export:
+export $(cat .env | xargs) && npm run local-fetch
 ```
 
-When deploying via CDK, pass the URL at deploy time:
+When deploying via CDK, source the URL from an untracked file or a CI secret store
+rather than echoing it on the command line. CDK reads `DISCORD_WEBHOOK_URL` at
+synth time (see `infra/stack.ts:55-63`) and embeds it in the Lambda environment, so
+the value should never appear in a published transcript:
 
 ```bash
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." npm run deploy
+# CI / local deploy — source from a secret store or masked CI variable, then deploy:
+set -a; . ./.env.discord; set +a   # .env.discord is gitignored
+npm run deploy
 ```
 
-The URL is exposed to the Lambda as a regular environment variable. The Lambda's IAM
-role does not need any Discord permissions — the webhook URL is the only credential.
+For production deployments, prefer SSM Parameter Store or Secrets Manager over an
+inline Lambda environment value — `cdk.out/` and CloudFormation templates can echo
+the value, and any operator with `logs:GetLogEvents` on the function can read it
+back from cold-start records. Never commit `.env`, `cdk.out/`, or logs that
+contain the webhook URL. The Lambda's IAM role does not need any Discord
+permissions — the webhook URL is the only credential.
 
 ## Step 5: Verify
 
@@ -777,9 +847,10 @@ per-source failures including Discord post failures.
 
 If the webhook URL is compromised (e.g. accidentally logged, pasted into a public
 forum), the recovery is to delete the compromised webhook in the same **Integrations**
-panel and create a new one. Update `DISCORD_WEBHOOK_URL` and redeploy. There is no
-rate-limit concern with this — webhooks are a "delete-and-recreate" credential, not a
-rotating key.
+panel and create a new one. Update `DISCORD_WEBHOOK_URL` and redeploy. Webhook
+executions remain subject to Discord's normal rate limits and can return HTTP 429;
+the `fetch` op should honour the `Retry-After` response header (and the
+`X-RateLimit-*` family of headers) rather than retrying on a fixed cadence.
 ```
 
 - [ ] **Step 2: Update `README.md` to link to the new doc**
@@ -827,10 +898,11 @@ deployed stack).
 
 Run: `git diff --stat`
 Expected: changes limited to `src/agent/status.ts`, `tests/status.test.ts`,
-`docs/superpowers/specs/2026-08-08-sqlite-s3-agent-tutorial-design.md`, `docs/01-architecture.md`,
-`docs/05-from-tutorial-to-prod.md`, `docs/06-discord-webhook-setup.md` (new),
-`docs/bedrock-model-comparison.md`, `src/format/families.ts`, `README.md`,
-`docs/02-rehydration.md`.
+`docs/superpowers/specs/2026-08-08-sqlite-s3-agent-tutorial-design.md`,
+`docs/superpowers/plans/2026-08-08-sqlite-s3-agent-tutorial-pr4-reader-bugfixes.md`,
+`docs/01-architecture.md`, `docs/05-from-tutorial-to-prod.md`,
+`docs/06-discord-webhook-setup.md` (new), `docs/bedrock-model-comparison.md`,
+`src/format/families.ts`, `README.md`, `docs/02-rehydration.md`.
 
 ---
 

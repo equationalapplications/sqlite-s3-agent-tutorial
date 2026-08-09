@@ -34,6 +34,12 @@ interface ReaderState {
 
 export interface StatusReader {
   getStatus(store: Store, storeKey: string): Promise<StatusResult>;
+  /**
+   * Test-only: returns a snapshot of the internal reader state for assertions on the
+   * cache invariant (spec §4.3.1). Production code must not rely on this — it exposes
+   * implementation detail that the public contract deliberately does not promise.
+   */
+  __peekReaderState(): { cachedEtag: string | null; dbIsOpen: boolean };
 }
 
 function queryStatus(db: Database.Database, etag: string): StatusResult {
@@ -98,10 +104,15 @@ export function createStatusReader(dbPath: string): StatusReader {
         // `better-sqlite3` keeps a page cache in memory; if the file on disk changes
         // underneath an open handle, the cache describes a file that no longer exists —
         // silently wrong answers, no error. Close before overwriting (spec §4.3).
+        // Clear both fields together so a partial failure (rmSync, store.get, write,
+        // openReadOnlyDatabase throwing) leaves the cache in the empty-cache state
+        // `(null, undefined)` rather than the invalid `(oldEtag, undefined)`. Only the
+        // successful open at the end of this branch restores the populated state.
         if (state.db !== undefined) {
           state.db.close();
-          state.db = undefined;
         }
+        state.db = undefined;
+        state.cachedEtag = null;
         // `force: true` makes the delete robust against the file disappearing between the
         // existsSync check and the rmSync call — `/tmp` is shared with the writer, and
         // `/tmp` cleanup can race us too. With `force` the no-op case is harmless.
@@ -111,23 +122,24 @@ export function createStatusReader(dbPath: string): StatusReader {
         if (object === null) {
           // HEAD succeeded but GET raced a delete between the two calls — treat as
           // no-snapshot rather than throwing, since the outcome the caller cares about
-          // (nothing to query) is identical to the head === null branch above.
-          // Reset cachedEtag so the next call retries cleanly rather than leaving
-          // (cachedEtag=oldEtag, db=undefined), an invalid state per spec §4.3.1.
-          state.cachedEtag = null;
+          // (nothing to query) is identical to the head === null branch above. cachedEtag
+          // was already cleared at the top of this branch, so the next call retries the
+          // full cache-miss path from a known-empty state (spec §4.3.1).
           return { snapshotVersion: null, sources: [], recentNotifications: [] };
         }
 
         writeFileSync(dbPath, object.body);
-        // Assign cachedEtag only after openReadOnlyDatabase succeeds — if open throws,
-        // cachedEtag stays at its prior value (or null) and the next call retries cleanly
-        // instead of leaving (cachedEtag=newEtag, db=undefined), an invalid state per
-        // spec §4.3.1.
+        // Assign cachedEtag only after openReadOnlyDatabase succeeds — any throw between
+        // here and the top of the branch (rmSync, store.get, writeFileSync, open) leaves
+        // the cache in `(null, undefined)` per spec §4.3.1.
         state.db = openReadOnlyDatabase(dbPath);
         state.cachedEtag = object.etag;
       }
 
       return queryStatus(state.db as Database.Database, state.cachedEtag as string);
+    },
+    __peekReaderState() {
+      return { cachedEtag: state.cachedEtag, dbIsOpen: state.db !== undefined };
     },
   };
 }
