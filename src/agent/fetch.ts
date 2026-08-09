@@ -3,8 +3,10 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import type Database from 'better-sqlite3';
 import { bootstrap } from '../db/bootstrap.js';
 import { openDatabase } from '../db/open.js';
+import type { Embedder } from '../embed/titan.js';
 import type { DiscordPoster } from '../discord/poster.js';
 import type { MessageFormatter } from '../format/types.js';
+import { findNearestMatch, insertEmbedding } from '../rag/similarity.js';
 import type { SourceFetcher } from '../sources/types.js';
 import type { Store } from '../store/types.js';
 import { finishRun, startRun } from './runLog.js';
@@ -16,6 +18,7 @@ export interface RunFetchParams {
   sources: SourceFetcher[];
   poster: DiscordPoster;
   formatter: MessageFormatter;
+  embedder: Embedder;
   runId?: string;
   now?: () => number;
 }
@@ -78,7 +81,19 @@ export async function runFetch(params: RunFetchParams): Promise<RunFetchResult> 
         continue; // dedup: no formatter call, no post, no notification row
       }
 
-      const formatted = await params.formatter.format(source.name, rawValue);
+      // RAG query step: find the closest same-source past notification. Failure here is
+      // isolated — it degrades to "no similarity context this run" (same as a source's
+      // first-ever notification), it never blocks the post itself (spec §6).
+      let match: Awaited<ReturnType<typeof findNearestMatch>> = null;
+      try {
+        const queryVector = await params.embedder.embed(rawValue);
+        match = findNearestMatch(db, source.name, queryVector);
+      } catch (embedError: unknown) {
+        const message = embedError instanceof Error ? embedError.message : String(embedError);
+        errors.push(`${source.name} (embedding query): ${message}`);
+      }
+
+      const formatted = await params.formatter.format(source.name, rawValue, match);
       await params.poster.post(formatted);
 
       const postedAt = now();
@@ -93,10 +108,24 @@ export async function runFetch(params: RunFetchParams): Promise<RunFetchResult> 
            last_posted_at = excluded.last_posted_at`,
       ).run(source.name, rawValue, postedAt, postedAt);
 
-      db.prepare(
-        `INSERT INTO agent_notifications (source, value, formatted_message, posted_at)
-         VALUES (?, ?, ?, ?)`,
-      ).run(source.name, rawValue, formatted, postedAt);
+      const insertResult = db
+        .prepare(
+          `INSERT INTO agent_notifications
+             (source, value, formatted_message, posted_at, nearest_match_id, nearest_match_distance)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(source.name, rawValue, formatted, postedAt, match?.notificationId ?? null, match?.distance ?? null);
+
+      // RAG store step: embed what was actually posted and make it a future match
+      // candidate. Failure here is isolated too — the notification has already
+      // committed; only the corpus fails to grow by this one entry (spec §6).
+      try {
+        const storeVector = await params.embedder.embed(formatted);
+        insertEmbedding(db, Number(insertResult.lastInsertRowid), storeVector);
+      } catch (storeError: unknown) {
+        const message = storeError instanceof Error ? storeError.message : String(storeError);
+        errors.push(`${source.name} (embedding store): ${message}`);
+      }
 
       notificationsSent++;
     } catch (error: unknown) {
