@@ -16,6 +16,7 @@ The base tutorial posts one Discord message per day, on value change only. For l
 
 - **One writer, no dedup, one message per tick.** The existing `runFetch` is the only writer. It always fetches all sources, always formats ONCE with a clean context (no RAG), then runs the RAG lookup on the LLM's output and appends a "Reminds me of" suffix mechanically. The Discord channel gets one message per tick. Per-source `agent_notifications` rows are still written (one per source per tick) so the status endpoint and RAG corpus work unchanged, but they all carry the same combined `formatted_message` and the same RAG match.
 - **Two-step RAG: format first, then look up.** The LLM is never asked to reference a closest past reading. The RAG lookup happens after the format call: the writer embeds the LLM's output, queries the KNN corpus (no per-source filter), and appends `\n\nReminds me of: <past message>` to the LLM's output before posting. This keeps the LLM prompt simple, the cosine similarity tight (query and corpus both key on the LLM's output text), and the suffix mechanical rather than LLM-driven.
+- **No suffix snowball.** The LLM's pre-suffix output is stored in a new `base_message` column on `agent_notifications` and is the only thing that gets embedded into the RAG corpus. The `formatted_message` column continues to hold the full posted message (with "Reminds me of" suffix if present). The RAG match returns the past tick's `base_message` for the suffix, never its `formatted_message`. Because `base_message` is always the LLM's clean pre-suffix output, its size is bounded (~150 chars), the "Reminds me of" suffix stays bounded, and the posted message never grows past one base message + one suffix. Without this separation, appending "Reminds me of: $past" each tick recursively accumulates past messages and the posted text grows past Discord's 2000-char limit after ~13 ticks, jamming the loop.
 - **`loop-stop` actually disables the EventBridge rule.** A stopped loop means no further scheduled invocations, not a Lambda that returns early. Same Lambda, same Function URL, just no trigger firing. `loop-start` re-enables it.
 - **Loop token is auto-generated, not user-set.** The CDK stack generates `LOOP_TOKEN` at synth time using a secure RNG, passes it to the Lambda env, and exposes it as a stack output. The `loop-start.sh` / `loop-stop.sh` scripts read the token from stack outputs at runtime — the user just runs the script, no `export LOOP_TOKEN=...` required. The token is regenerated on each redeploy; this is acceptable for a single-user tutorial and the deliberate trade-off vs managing a secret manually.
 - **No new user-facing tutorial doc.** The base tutorial teaches the pattern, not the loop. The README gets a short "Loop mode" subsection with the script commands; `docs/07-budget-protection.md` gets a one-paragraph note that the loop drives ~480 Bedrock calls/day while running. No new `docs/0X-*.md`.
@@ -58,7 +59,7 @@ EventBridge rate(5 min) ──> Lambda (op:"fetch")
                               │
                               ├─ STEP 3: embed preMessage, KNN over agent_embeddings
                               │     (no per-source filter) → nearest past notification
-                              │     → if match exists: preMessage += "\n\nReminds me of: " + match.formattedMessage
+                              │     → if match exists: preMessage += "\n\nReminds me of: " + match.baseMessage
                               │     → finalMessage = preMessage [with optional suffix]
                               │
                               ├─ STEP 4: poster.post(finalMessage)  ← ONE post
@@ -85,13 +86,26 @@ scripts/loop-stop.sh:
 
 ## 3. Data model
 
-**No schema changes.** `agent_sources`, `agent_notifications`, `agent_runs`, and `agent_embeddings` are unchanged.
+**One new column on `agent_notifications`.** The RAG spec already added `nearest_match_id` and `nearest_match_distance`; this spec adds `base_message TEXT` (nullable). Existing columns are unchanged.
 
-`agent_notifications` gains one row per source per tick (so ~576 rows/day at 5-min cadence). All rows from the same tick carry the same `formatted_message` (the final posted message, with "Reminds me of" suffix if a match exists), the same `posted_at`, and the same `nearest_match_id` / `nearest_match_distance` (the single global RAG match for the tick — null if no history yet or the lookup failed). The `value` column is the per-source value. This preserves the existing schema and query patterns (status endpoint, RAG KNN) without modification.
+```sql
+ALTER TABLE agent_notifications ADD COLUMN base_message TEXT;
+```
 
-`agent_embeddings` gains one row per source per tick. The embedded text is the LLM's **pre-suffix** output (the friendly comment + haiku, without the "Reminds me of" line). Two rows for the same text is a small redundancy but lets the global KNN query (no per-source filter) keep working unchanged — the LLM output is what the corpus keys on, not the posted-with-suffix text.
+The migration is added to `bootstrap()` via the same `PRAGMA table_info` guard the RAG spec uses for its own column additions — SQLite has no `ADD COLUMN IF NOT EXISTS`. A snapshot from before this feature shipped will have `base_message = NULL` on all rows; the status endpoint surfaces null as "—" (pre-loop row); the RAG query ignores them (the corpus embeds only rows with a non-null `base_message`, and any row without one is simply not a match candidate).
 
-Both grow at the same rate as before — the loop is short-lived so the absolute size stays small. A RAG corpus cap or vacuum job is a future spec, called out as out of scope.
+The two columns separate two distinct things:
+
+- **`formatted_message`** — the full posted message (with "Reminds me of" suffix if a match exists). This is what the Discord webhook sends and what the status endpoint shows.
+- **`base_message`** — the LLM's pre-suffix output (the friendly comment + haiku, without any "Reminds me of" line). This is what gets embedded into the RAG corpus and is what `findNearestMatch` returns for the suffix.
+
+The two diverge only when a past match exists. On the first tick and on RAG failures, `formatted_message = base_message`. The RAG query and the corpus both key on `base_message` (bounded ~150 chars). The "Reminds me of" suffix is built from the past match's `base_message`, never its `formatted_message`, so the snowball effect — where each tick's "Reminds me of" includes the previous tick's suffix, recursively — is impossible.
+
+`agent_notifications` gains one row per source per tick (~576 rows/day at 5-min cadence). All rows from the same tick carry the same `formatted_message` (with "Reminds me of" suffix if a match exists), the same `base_message` (the LLM's pre-suffix output), the same `posted_at`, and the same `nearest_match_id` / `nearest_match_distance` (the single global RAG match — null if no history yet or the lookup failed). The `value` column is the per-source value.
+
+`agent_embeddings` gains one row per source per tick. The embedded text is `base_message` (the LLM's pre-suffix output). The two rows for the same tick (one per source) are intentional — they keep the global KNN query unchanged while letting the per-source `agent_notifications` rows remain queryable. A future spec could collapse these to one row per tick; out of scope here.
+
+Both grow at the same rate as before. A RAG corpus cap or vacuum job is a future spec, called out as out of scope.
 
 ---
 
@@ -151,19 +165,19 @@ New flow:
 2. For each source, call `source.fetch()` and collect results into a per-source map. Per-source failures are caught and folded into `errors`; the source is omitted from the map.
 3. **If the per-source map is empty** (both sources failed), skip the rest of the tick. Finish the `agent_runs` row with `notificationsSent: 0` and publish the snapshot.
 4. Build a `LoopContext` with `date = ISO slice of now()`, `location = config.weatherLocation`, `weatherValue` / `cryptoValue` from the map (or `'<unavailable>'` if a source failed). Call `params.formatter.format(ctx)` → `preMessage`. If the format call throws, fold the error into `errors`, skip the rest of the tick.
-5. **Two-step RAG.** Call `params.embedder.embed(preMessage)` to get `preVector`. Call `findNearestMatch(db, preVector)` (no per-source filter — global KNN over `agent_embeddings`) to get `{ notificationId, distance, formattedMessage: pastMessage }` or `null`. If the embed or lookup throws, fold the error into `errors` and proceed with no suffix.
-6. Build `finalMessage = match !== null ? preMessage + "\n\nReminds me of: " + pastMessage : preMessage`.
+5. **Two-step RAG.** Call `params.embedder.embed(preMessage)` to get `preVector`. Call `findNearestMatch(db, preVector)` (no per-source filter — global KNN over `agent_embeddings`) to get `{ notificationId, distance, baseMessage: pastBaseMessage }` or `null`. `baseMessage` is the past tick's pre-suffix output — the LLM's clean message, never its `formatted_message`. This is the snowball-prevention key: the suffix is built from `pastBaseMessage`, not from a past `formatted_message` that already contains a "Reminds me of" line. If the embed or lookup throws, fold the error into `errors` and proceed with no suffix.
+6. Build `finalMessage = match !== null ? preMessage + "\n\nReminds me of: " + match.baseMessage : preMessage`.
 7. Call `params.poster.post(finalMessage)`. If the post throws, fold the error into `errors`, skip the per-source inserts.
-8. For each source in the per-source map, insert one `agent_notifications` row with the per-source `value`, `formatted_message = finalMessage`, `nearest_match_id = match?.notificationId ?? null`, `nearest_match_distance = match?.distance ?? null`, and the shared `posted_at`. Update `agent_sources` with the per-source last-value/last-fetched/last-posted timestamps.
-9. **Embed the LLM's pre-suffix output and store it** under each source label: `insertEmbedding(db, notificationId, preVector)`. The corpus keys on the LLM's output, not the posted-with-suffix message — this is what makes the cosine match tight. Per-source embed/store failures are caught and folded into `errors`; the row stays.
+8. For each source in the per-source map, insert one `agent_notifications` row with the per-source `value`, `formatted_message = finalMessage`, `base_message = preMessage`, `nearest_match_id = match?.notificationId ?? null`, `nearest_match_distance = match?.distance ?? null`, and the shared `posted_at`. Update `agent_sources` with the per-source last-value/last-fetched/last-posted timestamps.
+9. **Embed the LLM's pre-suffix output and store it** under each source label: `insertEmbedding(db, notificationId, preVector)`. The corpus keys on `base_message`, not on `formatted_message` — this is what makes the cosine match tight and what prevents the snowball. Per-source embed/store failures are caught and folded into `errors`; the row stays.
 10. Finish the `agent_runs` row with `notificationsSent: 1` (one combined post per tick, regardless of how many sources contributed).
 11. Publish the snapshot (unchanged).
 
 The `runFetch` signature gains `weatherLocation: string` (so the writer can populate the context's `location` field). The result shape `RunFetchResult` is unchanged; `notificationsSent` is now `0 | 1` per tick.
 
-### 4.5 `src/rag/similarity.ts` — global KNN
+### 4.5 `src/rag/similarity.ts` — global KNN, returns `baseMessage`
 
-`findNearestMatch(db, queryVector)` — the function loses its `source` parameter. The SQL removes the `source = ?` filter; the match is the single most similar notification across all sources. The return shape is unchanged: `{ notificationId, distance, formattedMessage, postedAt } | null`.
+`findNearestMatch(db, queryVector)` — the function loses its `source` parameter. The SQL removes the `source = ?` filter; the match is the single most similar notification across all sources. The return shape changes from `{ notificationId, distance, formattedMessage, postedAt }` to `{ notificationId, distance, baseMessage, postedAt }` — the match returns the past tick's `base_message` (the LLM's pre-suffix output), not its `formatted_message`. The writer uses `baseMessage` for the "Reminds me of" suffix, which is what prevents the snowball.
 
 The function is now called once per tick (in step 5 above), not once per source. The KNN is global; the per-source labels in `agent_embeddings` are no longer used for filtering (they remain as the `notification_id → source` join path for the status endpoint, unchanged).
 
@@ -226,8 +240,9 @@ The scripts also print the rule's current state on success so the user can see t
 
 Unit tests (vitest) for:
 
-- `runFetch` happy path with RAG history: both sources succeed, formatter is called ONCE with a clean `LoopContext` (no RAG fields), the LLM's output is embedded, KNN returns a match, `finalMessage` includes the `\n\nReminds me of: <past>` suffix, Discord is posted ONCE, two `agent_notifications` rows are written (one per source) with the same `formatted_message` (including the suffix) and the same `nearest_match_id`, two `agent_embeddings` rows are inserted with the **pre-suffix** text.
-- `runFetch` first-tick path (no RAG history): the LLM is called, the RAG lookup returns null (no past notifications), `finalMessage = preMessage` (no suffix), one combined Discord post, two notification rows with `nearest_match_id = null`.
+- `runFetch` happy path with RAG history: both sources succeed, formatter is called ONCE with a clean `LoopContext` (no RAG fields), the LLM's output is embedded, KNN returns a match whose `baseMessage` is the past tick's pre-suffix text, `finalMessage` includes the `\n\nReminds me of: <past.baseMessage>` suffix, Discord is posted ONCE, two `agent_notifications` rows are written (one per source) with the same `formatted_message` (including the suffix), the same `base_message` (the pre-suffix text), and the same `nearest_match_id`, two `agent_embeddings` rows are inserted keyed on `base_message`.
+- `runFetch` first-tick path (no RAG history): the LLM is called, the RAG lookup returns null (no past notifications), `finalMessage = preMessage` (no suffix), one combined Discord post, two notification rows with `formatted_message = base_message = preMessage` and `nearest_match_id = null`.
+- **Snowball regression test (critical):** simulate 20 consecutive ticks where each past `formatted_message` is built by appending the prior tick's full `formatted_message` to a ~150-char base. Without the `base_message` separation, the 20th tick's `finalMessage` would exceed Discord's 2000-char limit and the test would assert a 400-style post failure. With the separation, each tick's `base_message` is always ~150 chars and the `finalMessage` is always bounded (base + one suffix of past base). The test pins this: 20 ticks, every post succeeds, every `finalMessage.length < 500`.
 - `runFetch` with one source failing (e.g., coingecko down): the other source still contributes; formatter receives `weatherValue: '72F'`, `cryptoValue: '<unavailable>'`; one notification row per successful source; `errors` includes the failed source.
 - `runFetch` with both sources failing: formatter is not called, no Discord post, no notification rows, `errors` includes both sources, `notificationsSent: 0`.
 - `runFetch` formatter failure: caught and folded into `errors`, no RAG lookup, no Discord post, no notification rows, snapshot is still published.
@@ -258,5 +273,5 @@ Per the user instruction, no new `docs/0X-*.md` tutorial file. Two small changes
 - **RAG corpus bloat over long runs.** If the loop is ever left running for days, `agent_notifications` and `agent_embeddings` grow linearly (~576 rows/day each at 5-min cadence with two sources). A future spec could add a sliding-window cap or a vacuum job. This spec keeps the "every posted message is searchable forever" RAG invariant intact and relies on the short-lived nature of the loop in practice.
 - **Loop token rotation.** `LOOP_TOKEN` is auto-generated at synth time and stays stable for the life of the stack. A redeploy regenerates the token and updates the stack output. There's no manual override path — for a single-user tutorial this is the deliberate trade-off for not managing a secret by hand. If the token is leaked, the recovery is `npm run deploy` (which writes a new token).
 - **Per-source RAG metadata on the row.** With the new design, the `nearest_match_id` / `nearest_match_distance` columns are the same on all per-source rows of a tick (the single global RAG match for the combined message). The status endpoint will show the same match twice (once per source row). This is mildly redundant but not wrong; if a future spec wants to deduplicate the per-source rows into one row per tick, that's a schema change worth its own design.
-- **"Reminds me of" message length.** The past message (the matched `formatted_message`, which itself may include a "Reminds me of" suffix) is appended verbatim. Discord's 2000-char limit caps the chain length. At 5-min cadence, a single past message is short enough that this is fine for any reasonable run length, but a future spec could truncate the suffix or strip nested "Reminds me of" lines.
+- **"Reminds me of" message length.** With the `base_message` separation, the suffix is always built from the past tick's pre-suffix text (a single LLM output, ~150 chars), never from a past `formatted_message` that includes a prior "Reminds me of" line. The posted message is bounded at one base + one suffix (~300 chars typical), well under Discord's 2000-char limit. No chain growth, no truncation needed.
 - **CDK synth-time token across multi-env deploys.** `crypto.randomBytes(24)` runs at synth time, so the same `cdk.out` template deployed to multiple environments carries the same token. For a single-user tutorial this is acceptable; the documented behavior is "redeploy to rotate."
