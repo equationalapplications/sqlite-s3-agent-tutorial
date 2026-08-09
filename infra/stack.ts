@@ -22,7 +22,14 @@ interface AgentStackProps extends cdk.StackProps {
  * EventBridge schedule, one Function URL (spec §2). `reservedConcurrentExecutions: 1`
  * enforces the single-writer invariant (spec §2).
  */
-class AgentStack extends cdk.Stack {
+/**
+ * The CDK stack synthesized by `infra/stack.ts`. Exported so `tests/infra.test.ts`
+ * can instantiate it under a deterministic synth environment; the module-level
+ * `new AgentStack(app, STACK_NAME, ...)` at the bottom of this file still runs
+ * when the module is imported from the CDK CLI, which is the only intended
+ * runtime entry point for `npm run deploy`.
+ */
+export class AgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
