@@ -1,7 +1,6 @@
 import { type BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
-import type { SourceName } from '../db/schema.js';
 import { resolveFamily } from './families.js';
-import type { MessageFormatter, SimilarPastResult } from './types.js';
+import type { LoopContext, MessageFormatter } from './types.js';
 
 export interface BedrockFormatterOptions {
   client: BedrockRuntimeClient;
@@ -31,17 +30,30 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * The LLM writes a short friendly comment and a closing haiku. The LLM is *not* told
+ * about RAG — the "Reminds me of" suffix is appended mechanically in the writer after
+ * the format call returns (loop-mode + poetic-closing spec §4.3). Numerology is
+ * deliberately out: the LLM produces cliché numerology platitudes, while a haiku
+ * gives the model real creative room and reads as varied across runs.
+ */
 const SYSTEM_PROMPT =
-  'You write a single short, friendly Discord notification message announcing a new ' +
-  'value for a tracked data source. Reply with the message text only — no quotes, no ' +
-  'preamble, no markdown formatting. If a closest past reading is included below, you ' +
-  'may naturally reference it if relevant, but you are not required to.';
+  'You write a short, friendly Discord message for a check-in bot that posts a ' +
+  'combined snapshot of a few tracked values every few minutes. The user ' +
+  'message below contains today\'s date, the location, and the current value ' +
+  'of each tracked reading. Write a brief comment (one or two sentences) that ' +
+  'draws on these inputs — vary your phrasing across runs; do not repeat the ' +
+  'same template. End with a short haiku (three lines, 5-7-5 syllables) that ' +
+  'weaves in the readings and the day\'s vibe. ' +
+  'Reply with the message text only — no quotes, no preamble, no markdown.';
 
-function buildUserPrompt(source: SourceName, rawValue: string, similarPast?: SimilarPastResult | null): string {
-  const base = `Source: ${source}\nNew value: ${rawValue}`;
-  if (similarPast === null || similarPast === undefined) return base;
-  const date = new Date(similarPast.postedAt).toISOString().slice(0, 10);
-  return `${base}\nClosest past reading (${date}): "${similarPast.formattedMessage}"`;
+function buildUserPrompt(ctx: LoopContext): string {
+  const lines = [
+    `Date: ${ctx.date}`,
+    `Location: ${ctx.location}`,
+    ...ctx.readings.map((r) => `${r.source}: ${r.value}`),
+  ];
+  return lines.join('\n');
 }
 
 /** Maps a Bedrock exception to a message naming the fix (spec §6, §12.4). */
@@ -69,8 +81,8 @@ function mapBedrockError(error: unknown, options: BedrockFormatterOptions): Erro
     case 'ResourceNotFoundException':
       return new Error(
         `Bedrock does not recognise the model id for ${where}. Check that bedrockModelId ` +
-          `is the base id with no inference-profile prefix — the prefix is supplied by ` +
-          `the family (spec §12.3). Underlying error: ${detail}`,
+          `is the base id with no inference-profile prefix — the prefix is supplied by the ` +
+          `family (spec §12.3). Underlying error: ${detail}`,
         { cause: error },
       );
     default:
@@ -91,12 +103,12 @@ function isThrottlingOr5xx(error: unknown): boolean {
  * other exception is not retried — access and validation failures are not transient.
  */
 export function createBedrockFormatter(options: BedrockFormatterOptions): MessageFormatter {
-  async function attempt(source: SourceName, rawValue: string, similarPast?: SimilarPastResult | null): Promise<string> {
+  async function attempt(ctx: LoopContext): Promise<string> {
     const response = await options.client.send(
       new ConverseCommand({
         modelId: composedModelId(options.modelId),
         system: [{ text: SYSTEM_PROMPT }],
-        messages: [{ role: 'user', content: [{ text: buildUserPrompt(source, rawValue, similarPast) }] }],
+        messages: [{ role: 'user', content: [{ text: buildUserPrompt(ctx) }] }],
         inferenceConfig: { maxTokens: options.maxOutputTokens },
       }),
     );
@@ -109,14 +121,14 @@ export function createBedrockFormatter(options: BedrockFormatterOptions): Messag
   }
 
   return {
-    async format(source: SourceName, rawValue: string, similarPast?: SimilarPastResult | null): Promise<string> {
+    async format(ctx: LoopContext): Promise<string> {
       try {
-        return await attempt(source, rawValue, similarPast);
+        return await attempt(ctx);
       } catch (error: unknown) {
         if (isThrottlingOr5xx(error)) {
           await delay(RETRY_DELAY_MS);
           try {
-            return await attempt(source, rawValue, similarPast);
+            return await attempt(ctx);
           } catch (retryError: unknown) {
             throw mapBedrockError(retryError, options);
           }
