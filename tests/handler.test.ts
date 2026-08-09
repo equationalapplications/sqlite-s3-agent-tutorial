@@ -226,5 +226,36 @@ describe('runHandler', () => {
       );
       expect(result.statusCode).toBe(200);
     });
+
+    it('makes exactly one Converse call per tick even with two sources configured', async () => {
+      s3.on(GetObjectCommand).rejects({ name: 'NoSuchKey' }); // bootstrap
+      s3.on(PutObjectCommand).resolves({ ETag: '"v1"' });
+      bedrock.on(ConverseCommand).resolves({
+        output: { message: { role: 'assistant', content: [{ text: 'A short friendly comment.\n\nA haiku here.' }] } },
+        stopReason: 'end_turn',
+      });
+
+      const env = {
+        DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+        SNAPSHOT_BUCKET: 'test-bucket',
+        DB_PATH: join(dir, 'memory.db'),
+        SOURCES: '["weather", "crypto"]',
+      };
+
+      const result = await runHandler(
+        { op: 'fetch' },
+        env,
+        { s3Client: s3 as unknown as S3Client, bedrockClient: bedrock as unknown as BedrockRuntimeClient },
+        {
+          weather: async () => '72F',
+          crypto: async () => '67234.10',
+        },
+      );
+
+      expect(result.statusCode).toBe(200);
+      // The combined-message reformulation means exactly one formatter call per tick,
+      // regardless of source count — the per-source loop is gone.
+      expect(bedrock.commandCalls(ConverseCommand)).toHaveLength(1);
+    });
   });
 });
