@@ -66,9 +66,12 @@ npm run deploy
 
 For production deployments, prefer **SSM Parameter Store** or **Secrets Manager**
 over an inline Lambda environment value — `cdk.out/` and CloudFormation templates
-echo environment values, and any operator with `logs:GetLogEvents` can read them
-back from cold-start records. Never commit `.env`, `cdk.out/`, or logs that
-contain the webhook URL.
+echo environment values, and any operator with `lambda:GetFunctionConfiguration`
+(or equivalent read access to the function's configuration) can read the same
+value back. CloudWatch log access (`logs:GetLogEvents`) is a separate concern:
+Lambda does not log environment variables by default, but any code that prints
+or otherwise echoes `DISCORD_WEBHOOK_URL` will surface it in the log stream.
+Never commit `.env`, `cdk.out/`, or logs that contain the webhook URL.
 
 The URL is the only credential the Lambda needs — its IAM role does not require any
 Discord permissions.
@@ -87,6 +90,9 @@ forum), the recovery is to delete the compromised webhook in the same **Integrat
 panel and create a new one. Update `DISCORD_WEBHOOK_URL` and redeploy.
 
 Webhook executions remain subject to Discord's normal rate limits and can return
-HTTP 429. The `fetch` op should honour the `Retry-After` response header (and the
-`X-RateLimit-*` family) rather than retrying on a fixed cadence — Discord does not
-publish the exact limits and they vary by channel and account.
+HTTP 429. The current poster treats 429 the same as any other non-2xx after its
+single fixed 250 ms 5xx retry — it throws `DiscordPostError` and the run records
+a per-source failure in `agent_runs.error`. Discord does not publish the exact
+limits and they vary by channel and account; if bounded 429 handling is needed,
+honour the `Retry-After` response header (and the `X-RateLimit-*` family) rather
+than retrying on a fixed cadence.
