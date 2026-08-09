@@ -20,7 +20,7 @@ for the wider context.
 S3 holds the master. Each Lambda's `/tmp` holds a short-lived, disposable sub-copy. The
 ETag is the version token that ties a sub-copy back to the master revision it came from.
 
-```
+```text
  ┌────────────────────────────────────────────────────────┐
  │                    Amazon S3 (MASTER)                  │
  │              [ agent.db ]        ETag: "xyz123"        │
@@ -54,6 +54,19 @@ ETag is the version token that ties a sub-copy back to the master revision it ca
 The important property is what *doesn't* happen: the loser never overwrites the winner.
 There is no silent lost update. The failure is loud and it is on the losing side.
 
+S3 returns three distinct errors when a conditional write cannot land, and this tutorial
+treats them as one and the same abort condition (`src/store/s3.ts`):
+
+- `412 Precondition Failed` — ETag mismatch on a conditional update.
+- `404 NoSuchKey` — the conditional update targets a missing object (the snapshot was
+  deleted out from under us between hydrate and publish).
+- `409 Conditional Request Conflict` — a concurrent operation raced the write (for
+  example a delete arriving mid-put).
+
+All three mean "the precondition did not hold, and the previous snapshot stays
+authoritative." The store translates each one to the same `PreconditionFailedError`, and
+the run row is marked `outcome='error'`.
+
 ## What this repo actually does with a 412
 
 The tutorial implements steps 1–4 (`src/store/s3.ts`, `src/agent/fetch.ts`) but stops
@@ -73,9 +86,11 @@ Two consequences worth being explicit about:
   schedule with `reservedConcurrentExecutions: 1`, this doesn't happen — it becomes
   reachable once a manual trigger can race the scheduled loop.
 
-If you add write paths, either serialize them ahead of the write or move the side effects
-after a successful publish. Reserved concurrency only serializes invocations of *one*
-function; it does nothing about two different functions writing the same key.
+If you add write paths, serialize them through one coordinator, or use a durable outbox
+with idempotent consumers. Moving side effects before or after a successful publish only
+changes which failure loses work; it does not make the operations atomic. Reserved
+concurrency only serializes invocations of *one* function; it does nothing about two
+different functions writing the same key.
 
 ## Adding rebase-and-retry
 
@@ -96,7 +111,7 @@ someone else's ETag and the fleet spends its time thrashing instead of committin
 progress goes down as concurrency goes up. Past a handful of writers, stop contending and
 serialize instead.
 
-```
+```text
 ┌─────────────────┐
 │ Lambda Agent 1  │ ──┐
 └─────────────────┘   │ (write requests)

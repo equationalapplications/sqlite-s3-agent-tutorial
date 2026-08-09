@@ -149,16 +149,19 @@ S3 has no partial file locking, so SQLite's own locking (`WAL` mode, `IMMEDIATE`
 transactions) is blind to a second Lambda container holding its own copy in `/tmp`. What
 keeps this safe is the conditional write: every publish carries `If-Match: <the ETag we
 hydrated from>`, so a writer whose base version has moved gets a `412` instead of
-silently clobbering the winner. That is optimistic concurrency control applied to a whole
-database file — the same pattern behind
+silently clobbering the winner. (Two related failures — `404 NoSuchKey` and
+`409 Conditional Request Conflict` — are translated to the same abort condition by
+`src/store/s3.ts`; the previous snapshot stays authoritative in all three cases.) That
+is optimistic concurrency control applied to a whole database file — the same pattern
+behind
 [S3 conditional writes](https://simonwillison.net/2024/Nov/26/s3-conditional-writes/) and
 [distributed SQLite on S3](https://dev.to/chris_king_bcff3b9663e84a/why-i-built-a-distributed-sqlite-on-s3-and-why-you-might-care-3h9h).
 
-This tutorial treats a `412` as an abort rather than rebasing and retrying: the tick's
-database work is discarded, but the Bedrock call and Discord post it already made are
-not. On the fixed schedule with `reservedConcurrentExecutions: 1` that never fires — it
-becomes reachable as soon as a second write path (a manual trigger, say) can race the
-loop.
+This tutorial treats a conditional-write failure as an abort rather than rebasing and
+retrying: the tick's database work is discarded, but the Bedrock call and Discord post
+it already made are not. On the fixed schedule with `reservedConcurrentExecutions: 1`
+that never fires — it becomes reachable as soon as a second write path (a manual
+trigger, say) can race the loop.
 
 [docs/10-concurrency.md](docs/10-concurrency.md) covers the full topology, how to add
 rebase-and-retry, the SQS single-writer queue for high contention, and why EFS is not the

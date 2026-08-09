@@ -224,7 +224,7 @@ The implementation is complete when all of the following pass:
 - [x] The CDK synth suite asserts `AuthType: AWS_IAM` on the `AWS::Lambda::Url` resource, both URL invocation permissions, and the unchanged EventBridge state.
 - [x] `npm run typecheck`, `npm run build`, and `cdk synth` complete cleanly.
 - [x] `npm run smoke` runs to completion immediately after `npm run deploy` (no fetch, `200` empty state, exit 0) and while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Pre-deploy verification: the shell harness in `tests/smoke.test.ts` exercises every branch with stubbed `aws`/`curl`/`sleep` and asserts the read-only invariant — see §5.1.)*
-- [x] `npm run smoke` runs to completion immediately after `npm run deploy` (no fetch, `200`, exit 0) and while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Live-verified 2026-08-09 against the deployed stack in `us-east-1` — see §9.1.)*
+- [x] `npm run smoke` runs to completion while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Live-verified 2026-08-09 against the deployed stack in `us-east-1` — populated-response and `429`-retry paths observed; see §9.1. The `snapshotVersion: null` empty-state branch remains harness-only and was not exercised live — see §9.1 caveat.)*
 
 ### 9.1 Live verification record (2026-08-09)
 
