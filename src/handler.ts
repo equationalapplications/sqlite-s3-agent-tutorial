@@ -185,6 +185,7 @@ export async function runHandler(
     poster: createFetchDiscordPoster(config.discordWebhookUrl),
     formatter,
     embedder,
+    weatherLocation: config.weatherLocation,
   });
 
   return { statusCode: 200, body: JSON.stringify(result) };

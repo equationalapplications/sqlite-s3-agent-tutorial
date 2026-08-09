@@ -18,6 +18,7 @@ async function main(): Promise<void> {
     poster: createFetchDiscordPoster(config.discordWebhookUrl),
     formatter: createLocalTemplateFormatter(),
     embedder: createLocalEmbedder(),
+    weatherLocation: config.weatherLocation,
   });
 
   console.log(JSON.stringify(result, null, 2));
