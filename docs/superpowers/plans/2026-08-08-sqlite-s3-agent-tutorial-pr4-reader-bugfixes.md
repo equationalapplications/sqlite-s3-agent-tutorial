@@ -217,9 +217,11 @@ Append to `tests/status.test.ts`:
       },
     };
 
-    // Seed a valid snapshot so we have bytes to recover with.
-    const seeded = await seedSnapshot(ctx.dbPath, ctx.store);
-    validBytes = seeded.body;
+    // Seed a valid snapshot so we have bytes to recover with. `seedSnapshot`
+    // returns `store.put(...)`, which is `{ etag: string }` — read the seeded
+    // file off disk to get the bytes.
+    await seedSnapshot(ctx.dbPath, ctx.store);
+    validBytes = readFileSync(ctx.dbPath);
 
     const readerDbPath = join(ctx.dir, 'reader-copy.db');
     const reader = createStatusReader(readerDbPath);

@@ -11,7 +11,11 @@ in S3. No database server, no VPC.
 ```bash
 npm install
 npm test
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." npm run local-fetch
+
+# Put your webhook URL in an untracked .env (see docs/06-discord-webhook-setup.md),
+# then source it and run the writer — keeping the URL out of shell history.
+set -a; . ./.env; set +a   # .env is gitignored
+npm run local-fetch
 ```
 
 That runs the writer against a local SQLite file with no AWS involved (Phase 1). To
