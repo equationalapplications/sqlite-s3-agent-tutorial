@@ -86,9 +86,15 @@ describe('createTitanEmbedder', () => {
   });
 
   it('throws on a response with a non-finite entry, no retry', async () => {
-    const badVector = [...vector256];
-    badVector[0] = Number.NaN;
-    bedrock.on(InvokeModelCommand).resolves(embeddingResponse(badVector));
+    // Hand-craft the response body so JSON.parse produces Infinity: JSON.stringify
+    // turns Number.NaN into `null`, which would fail the `typeof === 'number'` check
+    // before Number.isFinite ever runs. `1e400` parses to Infinity and exercises the
+    // finite-value guard directly.
+    const rawBody = `{"embedding":[${[...vector256].map((_, i) => (i === 0 ? '1e400' : String(vector256[i]!))).join(',')}],"inputTextTokenCount":256}`;
+    bedrock.on(InvokeModelCommand).resolves({
+      body: Uint8ArrayBlobAdapter.mutate(new TextEncoder().encode(rawBody)),
+      contentType: 'application/json',
+    });
 
     const embedder = createTitanEmbedder({ client, region: 'us-east-1' });
     await expect(embedder.embed('72F')).rejects.toThrow(/no embedding/i);
