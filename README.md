@@ -52,21 +52,25 @@ no token, no extra IAM grants:
 ```bash
 npm run loop-start   # calls `aws events enable-rule` on the deployed rule
 npm run loop-stop    # calls `aws events disable-rule` — no further ticks
+npm run loop-status  # reads `aws events describe-rule` — no side effects
 ```
 
 While the loop is running, each tick posts one combined Discord message: a short
 friendly comment drawn from today's date, weather, and crypto price, ending with a
 haiku. If a past message in the corpus is close enough, the LLM's pre-suffix output
-is mechanically appended with a `Reminds me of: <past message>` line. Both scripts
-read the rule name from the `LoopRuleName` stack output and call the EventBridge API
-directly using the same AWS CLI credentials the smoke script already requires.
+is mechanically appended with a `Reminds me of: <past message>` line. All three
+scripts read the rule name from the `LoopRuleName` stack output and call the
+EventBridge API directly using the same AWS CLI credentials the smoke script
+already requires. `loop-status` is read-only — print the rule's current
+`ENABLED`/`DISABLED` state plus its schedule expression and ARN.
 
 **Stop the loop when you're done** — `loop-stop.sh` disables the EventBridge rule so
 no further invocations occur and the recurring AWS cost stops. Note: running
 `npm run deploy` after `loop-stop.sh` re-enables the rule, since the CDK stack
-declares it `enabled: true` — re-run `loop-stop.sh` after any redeploy if you want
-the loop to stay off. See [docs/07-budget-protection.md](docs/07-budget-protection.md)
-for the per-day Bedrock call rate at 5-min cadence.
+declares it `enabled: true` — run `npm run loop-status` after any redeploy to
+confirm the state, then re-run `loop-stop.sh` if you want the loop to stay off. See
+[docs/07-budget-protection.md](docs/07-budget-protection.md) for the per-day
+Bedrock call rate at 5-min cadence.
 
 ## Triggering a fetch on demand
 
