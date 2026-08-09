@@ -14,7 +14,10 @@
     "local-fetch": "tsx src/localFetch.ts",
     "cdk": "cdk",
     "deploy": "bash scripts/deploy.sh",
-    "smoke": "bash scripts/smoke.sh"
+    "smoke": "bash scripts/smoke.sh",
+    "loop-start": "bash scripts/loop-start.sh",
+    "loop-stop": "bash scripts/loop-stop.sh",
+    "loop-status": "bash scripts/loop-status.sh"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.1",

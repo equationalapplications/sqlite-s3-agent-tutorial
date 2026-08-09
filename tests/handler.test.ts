@@ -5,12 +5,13 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
-import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
+import { BedrockRuntimeClient, ConverseCommand, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
+import { Uint8ArrayBlobAdapter } from '@smithy/core/serde';
 import { mockClient } from 'aws-sdk-client-mock';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runHandler } from '../src/handler.js';
 
 const s3 = mockClient(S3Client);
@@ -18,15 +19,31 @@ const bedrock = mockClient(BedrockRuntimeClient);
 
 describe('runHandler', () => {
   let dir: string;
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     s3.reset();
     bedrock.reset();
     dir = mkdtempSync(join(tmpdir(), 'agent-handler-test-'));
+    // Stub the Titan embed call (`InvokeModelCommand`) globally so the embedder gets
+    // a valid 256-dim vector. Without this, runFetch catches the embed failure and
+    // still returns success — a regression in the Titan path could pass through.
+    // The body must be a smithy `IUint8ArrayBlobAdapter` (a Uint8Array with a
+    // `transformToString` method); using a plain Uint8Array trips the SDK's strict
+    // input type. `Uint8ArrayBlobAdapter.fromString` produces a properly adapted one.
+    bedrock.on(InvokeModelCommand).resolves({
+      body: Uint8ArrayBlobAdapter.fromString(JSON.stringify({ embedding: new Array(256).fill(0) })),
+    });
+    // Stub the real fetch the DiscordPoster uses. Without this, the writer can perform
+    // an unstubbed outbound POST and still return 200 after runFetch catches the failure
+    // — which would let a regression in the embed or format path hide behind the
+    // swallowing catch. A 204 No Content is a valid Discord webhook success.
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
   });
 
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
+    fetchSpy.mockRestore();
   });
 
   it('routes op="fetch" through the writer and returns 200', async () => {
@@ -225,6 +242,49 @@ describe('runHandler', () => {
         { weather: async () => '72F' },
       );
       expect(result.statusCode).toBe(200);
+    });
+
+    it('makes exactly one Converse call per tick even with two sources configured', async () => {
+      s3.on(GetObjectCommand).rejects({ name: 'NoSuchKey' }); // bootstrap
+      s3.on(PutObjectCommand).resolves({ ETag: '"v1"' });
+      bedrock.on(ConverseCommand).resolves({
+        output: { message: { role: 'assistant', content: [{ text: 'A short friendly comment.\n\nA haiku here.' }] } },
+        stopReason: 'end_turn',
+      });
+
+      const env = {
+        DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+        SNAPSHOT_BUCKET: 'test-bucket',
+        DB_PATH: join(dir, 'memory.db'),
+        SOURCES: '["weather", "crypto"]',
+      };
+
+      const result = await runHandler(
+        { op: 'fetch' },
+        env,
+        { s3Client: s3 as unknown as S3Client, bedrockClient: bedrock as unknown as BedrockRuntimeClient },
+        {
+          weather: async () => '72F',
+          crypto: async () => '67234.10',
+        },
+      );
+
+      expect(result.statusCode).toBe(200);
+      // The combined-message reformulation means exactly one formatter call per tick,
+      // regardless of source count — the per-source loop is gone.
+      expect(bedrock.commandCalls(ConverseCommand)).toHaveLength(1);
+      // The embed call also runs once per tick (not per source) — the test must pin
+      // this so a regression that fans the embed out per source fails loudly. Without
+      // this assertion, the InvokeModelCommand stub in beforeEach would silently absorb
+      // any number of calls and the test would still pass.
+      expect(bedrock.commandCalls(InvokeModelCommand)).toHaveLength(1);
+      // And the Discord poster must actually post exactly once — without asserting this,
+      // a swallowed fetch failure (the real fetch is spied in beforeEach) would let
+      // runFetch catch the error and return success.
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const fetchArgs = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(fetchArgs[0]).toBe('https://discord.example/webhook');
+      expect(JSON.parse(String(fetchArgs[1].body))).toMatchObject({ content: expect.any(String) });
     });
   });
 });

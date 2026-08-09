@@ -213,4 +213,41 @@ describe('bootstrap — nearest_match columns', () => {
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it('adds base_message to agent_notifications when missing, and is idempotent on re-run', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-test-'));
+    const path = join(dir, 'memory.db');
+
+    const db = openDatabase(path);
+    bootstrap(db);
+
+    // After bootstrap, base_message column exists and is nullable.
+    const cols = db.prepare(`PRAGMA table_info(agent_notifications)`).all() as Array<{ name: string; notnull: number }>;
+    const base = cols.find((c) => c.name === 'base_message');
+    expect(base).toBeDefined();
+    expect(base?.notnull).toBe(0);
+
+    // Inserting a row with base_message = null is allowed (legacy rows post-migration).
+    db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run();
+    db.prepare(
+      `INSERT INTO agent_notifications (source, value, formatted_message, posted_at, base_message)
+       VALUES ('weather', 'v', 'msg', 1000, NULL)`,
+    ).run();
+
+    // Re-running bootstrap must not throw and must not alter the column.
+    expect(() => bootstrap(db)).not.toThrow();
+    const colsAfter = db.prepare(`PRAGMA table_info(agent_notifications)`).all() as Array<{ name: string }>;
+    expect(colsAfter.filter((c) => c.name === 'base_message')).toHaveLength(1);
+
+    // The legacy row (inserted with base_message = NULL above) must survive the
+    // second bootstrap unchanged — this pins data preservation, not only schema shape.
+    const legacy = db
+      .prepare(`SELECT base_message FROM agent_notifications`)
+      .all() as Array<{ base_message: string | null }>;
+    expect(legacy).toHaveLength(1);
+    expect(legacy[0]?.base_message).toBeNull();
+
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

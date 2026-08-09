@@ -1,13 +1,16 @@
-import type { MessageFormatter } from './types.js';
+import type { LoopContext, MessageFormatter } from './types.js';
 
-const LABELS = { weather: 'Weather update', crypto: 'Crypto update' } as const;
-
-/** Deterministic, no-AWS `MessageFormatter` for Phase 1 (spec §9). Never used in the
- *  deployed Lambda — `BedrockFormatter` (PR2) is the default there. */
+/** Deterministic, no-AWS `MessageFormatter` for local runs (spec §9). Emits a
+ *  `"{date} — {location} — {source}: {value}, ..."` shape — one segment per reading
+ *  in input order. Source-agnostic: a third source added per `docs/04-extending.md`
+ *  shows up in the output automatically. Not expected to generate a haiku — it's a
+ *  test-only stub. Never used in the deployed Lambda — `BedrockFormatter` is the
+ *  default there (`src/handler.ts`). */
 export function createLocalTemplateFormatter(): MessageFormatter {
   return {
-    async format(source, rawValue) {
-      return `${LABELS[source]}: ${rawValue}`;
+    async format(ctx: LoopContext): Promise<string> {
+      const segments = ctx.readings.map((r) => `${r.source}: ${r.value}`).join(', ');
+      return `${ctx.date} — ${ctx.location} — ${segments}`;
     },
   };
 }

@@ -2,6 +2,7 @@ import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-r
 import { mockClient } from 'aws-sdk-client-mock';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createBedrockFormatter } from '../src/format/bedrock.js';
+import type { LoopContext } from '../src/format/types.js';
 
 const bedrock = mockClient(BedrockRuntimeClient);
 
@@ -19,6 +20,12 @@ function emptyResponse() {
   };
 }
 
+const ctx: LoopContext = {
+  date: '2026-08-09',
+  location: 'NYC',
+  readings: [{ source: 'weather', value: '72F' }],
+};
+
 describe('createBedrockFormatter', () => {
   beforeEach(() => bedrock.reset());
   afterEach(() => bedrock.reset());
@@ -26,7 +33,7 @@ describe('createBedrockFormatter', () => {
   const client = new BedrockRuntimeClient({ region: 'us-east-1' });
 
   it('calls Converse with the configured model id and returns the response text', async () => {
-    bedrock.on(ConverseCommand).resolves(textResponse('Looks like 72F today!'));
+    bedrock.on(ConverseCommand).resolves(textResponse('A short friendly comment.\n\nA haiku here.'));
 
     const formatter = createBedrockFormatter({
       client,
@@ -35,8 +42,8 @@ describe('createBedrockFormatter', () => {
       maxOutputTokens: 512,
     });
 
-    const message = await formatter.format('weather', '72F');
-    expect(message).toBe('Looks like 72F today!');
+    const message = await formatter.format(ctx);
+    expect(message).toBe('A short friendly comment.\n\nA haiku here.');
 
     const calls = bedrock.commandCalls(ConverseCommand);
     expect(calls[0]?.args[0].input?.modelId).toBe('zai.glm-4.7-flash');
@@ -55,7 +62,7 @@ describe('createBedrockFormatter', () => {
       maxOutputTokens: 512,
     });
 
-    await formatter.format('weather', '72F');
+    await formatter.format(ctx);
 
     const calls = bedrock.commandCalls(ConverseCommand);
     expect(calls[0]?.args[0].input?.modelId).toBe(
@@ -63,8 +70,8 @@ describe('createBedrockFormatter', () => {
     );
   });
 
-  it('includes the closest past reading in the prompt when one is provided', async () => {
-    bedrock.on(ConverseCommand).resolves(textResponse('Similar to last time!'));
+  it('uses the haiku-instruction system prompt and includes the LoopContext fields in the user message', async () => {
+    bedrock.on(ConverseCommand).resolves(textResponse('ok'));
 
     const formatter = createBedrockFormatter({
       client,
@@ -73,32 +80,31 @@ describe('createBedrockFormatter', () => {
       maxOutputTokens: 512,
     });
 
-    await formatter.format('weather', '73F', {
-      formattedMessage: 'Looks like 72F today!',
-      postedAt: Date.parse('2026-08-01T00:00:00Z'),
+    await formatter.format({
+      date: '2026-08-09',
+      location: 'NYC',
+      readings: [
+        { source: 'weather', value: '72F' },
+        { source: 'crypto', value: '67234.10' },
+      ],
     });
 
     const calls = bedrock.commandCalls(ConverseCommand);
-    const userText = calls[0]?.args[0].input?.messages?.[0]?.content?.[0]?.text ?? '';
-    expect(userText).toContain('Looks like 72F today!');
-    expect(userText).toContain('2026-08-01');
-  });
+    const input = calls[0]?.args[0].input;
 
-  it('omits any past-reading line when nearestMatch is null or omitted', async () => {
-    bedrock.on(ConverseCommand).resolves(textResponse('No history yet!'));
+    // System prompt asks for a haiku — the LLM is never told about RAG.
+    const systemText = input?.system?.[0]?.text ?? '';
+    expect(systemText).toMatch(/haiku/i);
+    expect(systemText).not.toMatch(/closest past reading/i);
 
-    const formatter = createBedrockFormatter({
-      client,
-      modelId: 'zai.glm-4.7-flash',
-      region: 'us-east-1',
-      maxOutputTokens: 512,
-    });
-
-    await formatter.format('weather', '73F', null);
-
-    const calls = bedrock.commandCalls(ConverseCommand);
-    const userText = calls[0]?.args[0].input?.messages?.[0]?.content?.[0]?.text ?? '';
-    expect(userText).not.toContain('Closest past reading');
+    // User message carries date, location, and per-source readings.
+    const userText = input?.messages?.[0]?.content?.[0]?.text ?? '';
+    expect(userText).toContain('2026-08-09');
+    expect(userText).toContain('NYC');
+    expect(userText).toContain('weather');
+    expect(userText).toContain('72F');
+    expect(userText).toContain('crypto');
+    expect(userText).toContain('67234.10');
   });
 
   it('throws a descriptive error on AccessDeniedException', async () => {
@@ -111,7 +117,7 @@ describe('createBedrockFormatter', () => {
       maxOutputTokens: 512,
     });
 
-    await expect(formatter.format('weather', '72F')).rejects.toThrow(/model access/i);
+    await expect(formatter.format(ctx)).rejects.toThrow(/model access/i);
   });
 
   it('throws a descriptive error on ResourceNotFoundException naming the model id and region', async () => {
@@ -124,8 +130,8 @@ describe('createBedrockFormatter', () => {
       maxOutputTokens: 512,
     });
 
-    await expect(formatter.format('weather', '72F')).rejects.toThrow(/zai\.glm-4\.7-flash/);
-    await expect(formatter.format('weather', '72F')).rejects.toThrow(/us-east-1/);
+    await expect(formatter.format(ctx)).rejects.toThrow(/zai\.glm-4\.7-flash/);
+    await expect(formatter.format(ctx)).rejects.toThrow(/us-east-1/);
   });
 
   it('throws on a malformed response with no content, no retry', async () => {
@@ -138,7 +144,7 @@ describe('createBedrockFormatter', () => {
       maxOutputTokens: 512,
     });
 
-    await expect(formatter.format('weather', '72F')).rejects.toThrow(/no text/i);
+    await expect(formatter.format(ctx)).rejects.toThrow(/no text/i);
     expect(bedrock.commandCalls(ConverseCommand)).toHaveLength(1);
   });
 
@@ -155,7 +161,7 @@ describe('createBedrockFormatter', () => {
       maxOutputTokens: 512,
     });
 
-    const message = await formatter.format('weather', '72F');
+    const message = await formatter.format(ctx);
     expect(message).toBe('formatted after retry');
     expect(bedrock.commandCalls(ConverseCommand)).toHaveLength(2);
   });
@@ -170,7 +176,7 @@ describe('createBedrockFormatter', () => {
       maxOutputTokens: 512,
     });
 
-    await expect(formatter.format('weather', '72F')).rejects.toThrow(/Throttl/);
+    await expect(formatter.format(ctx)).rejects.toThrow(/Throttl/);
     expect(bedrock.commandCalls(ConverseCommand)).toHaveLength(2);
   });
 });

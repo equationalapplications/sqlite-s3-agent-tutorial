@@ -1,7 +1,7 @@
 # Budget protection
 
 This tutorial's normal cost is near zero — see [the README's Cost section](../README.md#cost).
-But three things can push it above "near zero" if misconfigured, and none of them are
+But four things can push it above "near zero" if misconfigured, and none of them are
 caught by anything else in this repo: they're all *valid* requests that just happen more
 often than intended.
 
@@ -21,13 +21,21 @@ often than intended.
 - **`SOURCES` or `BEDROCK_MAX_OUTPUT_TOKENS` misconfiguration.** More sources checked per
   run, or a much larger output token cap, both scale cost linearly and both are one
   environment variable away from the defaults.
+- **Loop mode running unattended.** Switching the 5-minute loop on (`npm run loop-start`)
+  drives ~576 Bedrock calls per day (1 Converse + 1 Titan per tick × 288 ticks/day) and
+  grows both `agent_notifications` and `agent_embeddings` by ~576 rows each per day
+  (~1,152 rows/day combined). At default model pricing this is roughly $0.02–$0.04/day,
+  but a loop left running for a weekend amplifies the spend noticeably. `npm run
+  loop-stop` disables the EventBridge rule so no further ticks fire — re-run it after
+  any `npm run deploy` that re-enables the rule (see the redeploy caveat in the
+  README's Loop mode section).
 
 None of these are bugs this codebase can prevent by construction — they're operator
 error, and the right backstop for operator error is a spending alarm, not more code.
 
 ## Set up an AWS Budget
 
-A cost budget with an email (or SNS) alert takes a few minutes and catches all three cases
+A cost budget with an email (or SNS) alert takes a few minutes and catches all four cases
 above, since all of them show up as spend regardless of which one caused it.
 
 Console: **Billing and Cost Management → Budgets → Create budget → Cost budget**. Suggested
