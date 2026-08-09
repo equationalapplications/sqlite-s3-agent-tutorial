@@ -110,15 +110,21 @@ class AgentStack extends cdk.Stack {
     });
     agentFunction.addToRolePolicy(bedrockPolicy);
 
-    // ---- Function URL (status reads, PR3 completes the op) ----
+    // ---- Function URL (status reads, op:status) ----
 
-    // Tutorial readers hit this URL with curl or a browser (spec §2 architecture
-    // diagram: "HTTP client (curl, browser)" → Function URL with no auth). AWS_IAM
-    // would require SigV4 signing and break the simplest case. The `status` op is
-    // wired up in PR3; revisit auth then if readers need access control.
+    // Locked to AWS_IAM (smoke-status-iam design §3.1): the URL enforces SigV4
+    // at the AWS boundary; the on-demand `FETCH_TRIGGER_TOKEN` in src/handler.ts
+    // is application-level defense in depth for the HTTP-triggered `fetch` op
+    // (which EventBridge never invokes) — not a substitute for this grant.
     const functionUrl = agentFunction.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.NONE,
+      authType: lambda.FunctionUrlAuthType.AWS_IAM,
     });
+
+    // Same-account principal (design §3.1). `grantInvokeUrl` synthesizes both
+    // `lambda:InvokeFunctionUrl` and the URL-scoped `lambda:InvokeFunction`
+    // permission required for Function URL invocation. Cross-account access is
+    // out of scope (design §8); per-user auditability is a future spec.
+    functionUrl.grantInvokeUrl(new iam.AccountPrincipal(this.account));
 
     // ---- EventBridge schedule (op: fetch, once a day) ----
 
