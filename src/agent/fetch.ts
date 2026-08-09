@@ -68,6 +68,11 @@ export function buildFinalMessageForDiscord(
   baseMessage: string | null,
   limit: number = DISCORD_MAX_MESSAGE_CHARS,
 ): string {
+  if (!Number.isInteger(limit) || limit < TRAILING_BLANK.length) {
+    throw new RangeError(
+      `buildFinalMessageForDiscord: limit must be an integer >= ${TRAILING_BLANK.length} (got ${limit})`,
+    );
+  }
   const effectiveLimit = limit - TRAILING_BLANK.length;
   if (preMessage.length > effectiveLimit) {
     return preMessage.slice(0, effectiveLimit) + TRAILING_BLANK;

@@ -54,12 +54,19 @@ echo "Function URL: $FUNCTION_URL"
 echo ""
 echo "=== Probing unsigned access (must be 403) ==="
 # Capture only the HTTP status; the body is irrelevant for the 403 assertion and
-# a public-URL regression would still show the right status code.
-UNSIGNED_STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+# a public-URL regression would still show the right status code. Connect and
+# transfer timeouts bound the wait so a hung DNS / TCP handshake can't keep
+# smoke.sh frozen.
+if ! UNSIGNED_STATUS=$(curl -s -o /dev/null --connect-timeout 5 --max-time 10 \
+  -w '%{http_code}' \
   -X POST \
   --header 'Content-Type: application/json' \
   --data '{"op":"status"}' \
-  "$FUNCTION_URL")
+  --show-error \
+  "$FUNCTION_URL"); then
+  echo "FAIL: unsigned status probe could not reach $FUNCTION_URL (curl transport error). Check your network and AWS_REGION." >&2
+  exit 1
+fi
 echo "Unsigned status: $UNSIGNED_STATUS"
 if [ "$UNSIGNED_STATUS" != "403" ]; then
   echo "FAIL: unsigned status probe returned $UNSIGNED_STATUS; Function URL is not enforcing AWS_IAM. Re-check infra/stack.ts (authType must be AWS_IAM, and \`functionUrl.grantInvokeUrl\` must be wired)." >&2
@@ -108,12 +115,22 @@ ATTEMPT=0
 STATUS_CODE=""
 while :; do
   ATTEMPT=$((ATTEMPT + 1))
-  STATUS_CODE=$(curl -s -o "$STATUS_BODY_FILE" -w '%{http_code}' \
+  # Cap each attempt's --max-time to the remaining retry budget so one attempt
+  # cannot extend the 75-second window. Floor at 1 to avoid a zero/negative
+  # --max-time on the final iteration.
+  REMAINING=$(( DEADLINE - $(date +%s) ))
+  if [ "$REMAINING" -lt 1 ]; then REMAINING=1; fi
+  if ! STATUS_CODE=$(curl -s -o "$STATUS_BODY_FILE" -w '%{http_code}' \
+    --connect-timeout 5 --max-time "$REMAINING" \
     --aws-sigv4 "aws:amz:$REGION:lambda" \
     --netrc-file "$NETRC_FILE" \
     "${CURL_HEADERS[@]}" \
     --data '{"op":"status"}' \
-    "$FUNCTION_URL")
+    --show-error \
+    "$FUNCTION_URL"); then
+    echo "FAIL: signed status probe could not reach $FUNCTION_URL (curl transport error). Check your network and AWS_REGION." >&2
+    exit 1
+  fi
   echo "Attempt $ATTEMPT: status $STATUS_CODE"
   if [ "$STATUS_CODE" = "200" ]; then
     break
@@ -136,26 +153,28 @@ echo "=== Validating status schema ==="
 # Populated responses must include a weather source with a non-null lastValue —
 # the smoke test proves the loop has actually produced a snapshot, not just
 # that the URL grant works.
-if ! jq -e . "$STATUS_BODY_FILE" >/dev/null 2>&1; then
-  echo "FAIL: signed status response is not valid JSON" >&2
+#
+# One schema predicate covers object shape, field presence, and array types —
+# snapshotVersion is string-or-null (the empty-state marker), and the two
+# collection fields are arrays. This rejects shape regressions like
+# `{"snapshotVersion":42,"sources":{...},"recentNotifications":"invalid"}`
+# which the previous `has()` + per-field read would have accepted.
+if ! jq -e '
+  type == "object"
+  and has("snapshotVersion")
+  and (.snapshotVersion == null or (.snapshotVersion | type) == "string")
+  and has("sources") and ((.sources | type) == "array")
+  and has("recentNotifications")
+  and ((.recentNotifications | type) == "array")
+' "$STATUS_BODY_FILE" >/dev/null 2>&1; then
+  echo "FAIL: signed status response is not a valid status object (snapshotVersion string|null, sources + recentNotifications arrays required)" >&2
   cat "$STATUS_BODY_FILE" >&2
   exit 1
 fi
 
-# `has(field)` distinguishes a missing field from one whose value is `null`. The
-# `// "fallback"` operator collapses both into the same string and would mask a
-# real schema regression where the field goes missing — exactly the failure
-# mode the schema check exists to catch.
-SNAPSHOT_PRESENT=$(jq -r 'has("snapshotVersion")' "$STATUS_BODY_FILE")
-SOURCES_PRESENT=$(jq -r 'has("sources")' "$STATUS_BODY_FILE")
-RECENT_PRESENT=$(jq -r 'has("recentNotifications")' "$STATUS_BODY_FILE")
-
-if [ "$SNAPSHOT_PRESENT" != "true" ] || [ "$SOURCES_PRESENT" != "true" ] || [ "$RECENT_PRESENT" != "true" ]; then
-  echo "FAIL: signed status response is missing one or more required top-level fields (snapshotVersion, sources, recentNotifications)" >&2
-  cat "$STATUS_BODY_FILE" >&2
-  exit 1
-fi
-
+# Read snapshotVersion without collapsing null so the empty-state branch below
+# can still recognize it. `jq -r` renders null as `null`, which is the value
+# the next branch compares against.
 SNAPSHOT_VERSION=$(jq -r '.snapshotVersion' "$STATUS_BODY_FILE")
 
 WEATHER_LAST_VALUE=$(jq -r '.sources[] | select(.name == "weather") | .lastValue // empty' "$STATUS_BODY_FILE")

@@ -196,7 +196,7 @@ If the function's logical id ever drifts (CDK replaces the `1E1F4F0F` hash), rep
     });
 ```
 
-…adding `import { Match } from 'aws-cdk-lib';` at the top of the file. (Generic capture is the recommended long-term shape — the CDK logical id is internal.)
+…adding `import { Match } from 'aws-cdk-lib/assertions';` at the top of the file (the same module `Template` comes from). (Generic capture is the recommended long-term shape — the CDK logical id is internal.)
 
 - [ ] **Step 4: Re-run after Task 1 is in place to confirm the suite goes green**
 
@@ -286,12 +286,21 @@ echo "Function URL: $FUNCTION_URL"
 echo ""
 echo "=== Probing unsigned access (must be 403) ==="
 # Capture only the HTTP status; the body is irrelevant for the 403 assertion and
-# a public-URL regression would still show the right status code.
-UNSIGNED_STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+# a public-URL regression would still show the right status code. Connect and
+# transfer timeouts bound the wait so a hung DNS / TCP handshake can't keep
+# smoke.sh frozen. The `if ! ...; then` block turns a curl transport error
+# into an actionable failure instead of `set -e` aborting silently inside the
+# command substitution.
+if ! UNSIGNED_STATUS=$(curl -s -o /dev/null --connect-timeout 5 --max-time 10 \
+  -w '%{http_code}' \
   -X POST \
   --header 'Content-Type: application/json' \
   --data '{"op":"status"}' \
-  "$FUNCTION_URL")
+  --show-error \
+  "$FUNCTION_URL"); then
+  echo "FAIL: unsigned status probe could not reach $FUNCTION_URL (curl transport error). Check your network and AWS_REGION." >&2
+  exit 1
+fi
 echo "Unsigned status: $UNSIGNED_STATUS"
 if [ "$UNSIGNED_STATUS" != "403" ]; then
   echo "FAIL: unsigned status probe returned $UNSIGNED_STATUS; Function URL is not enforcing AWS_IAM. Re-check infra/stack.ts (authType must be AWS_IAM, and \`functionUrl.grantInvokeUrl\` must be wired)." >&2
@@ -340,12 +349,22 @@ ATTEMPT=0
 STATUS_CODE=""
 while :; do
   ATTEMPT=$((ATTEMPT + 1))
-  STATUS_CODE=$(curl -s -o "$STATUS_BODY_FILE" -w '%{http_code}' \
+  # Cap each attempt's --max-time to the remaining retry budget so one attempt
+  # cannot extend the 75-second window. Floor at 1 to avoid a zero/negative
+  # --max-time on the final iteration.
+  REMAINING=$(( DEADLINE - $(date +%s) ))
+  if [ "$REMAINING" -lt 1 ]; then REMAINING=1; fi
+  if ! STATUS_CODE=$(curl -s -o "$STATUS_BODY_FILE" -w '%{http_code}' \
+    --connect-timeout 5 --max-time "$REMAINING" \
     --aws-sigv4 "aws:amz:$REGION:lambda" \
     --netrc-file "$NETRC_FILE" \
     "${CURL_HEADERS[@]}" \
     --data '{"op":"status"}' \
-    "$FUNCTION_URL")
+    --show-error \
+    "$FUNCTION_URL"); then
+    echo "FAIL: signed status probe could not reach $FUNCTION_URL (curl transport error). Check your network and AWS_REGION." >&2
+    exit 1
+  fi
   echo "Attempt $ATTEMPT: status $STATUS_CODE"
   if [ "$STATUS_CODE" = "200" ]; then
     break
@@ -368,21 +387,29 @@ echo "=== Validating status schema ==="
 # Populated responses must include a weather source with a non-null lastValue —
 # the smoke test proves the loop has actually produced a snapshot, not just
 # that the URL grant works.
-if ! jq -e . "$STATUS_BODY_FILE" >/dev/null 2>&1; then
-  echo "FAIL: signed status response is not valid JSON" >&2
+#
+# One schema predicate covers object shape, field presence, and array types —
+# snapshotVersion is string-or-null (the empty-state marker), and the two
+# collection fields are arrays. This rejects shape regressions like
+# `{"snapshotVersion":42,"sources":{...},"recentNotifications":"invalid"}`
+# which the previous `has()` + per-field read would have accepted.
+if ! jq -e '
+  type == "object"
+  and has("snapshotVersion")
+  and (.snapshotVersion == null or (.snapshotVersion | type) == "string")
+  and has("sources") and ((.sources | type) == "array")
+  and has("recentNotifications")
+  and ((.recentNotifications | type) == "array")
+' "$STATUS_BODY_FILE" >/dev/null 2>&1; then
+  echo "FAIL: signed status response is not a valid status object (snapshotVersion string|null, sources + recentNotifications arrays required)" >&2
   cat "$STATUS_BODY_FILE" >&2
   exit 1
 fi
 
-SNAPSHOT_VERSION=$(jq -r '.snapshotVersion // "__missing__"' "$STATUS_BODY_FILE")
-SOURCES_LEN=$(jq -r '.sources | length' "$STATUS_BODY_FILE")
-RECENT_LEN=$(jq -r '.recentNotifications | length' "$STATUS_BODY_FILE")
-
-if [ "$SNAPSHOT_VERSION" = "__missing__" ] || [ "$SOURCES_LEN" = "__invalid__" ] || [ "$RECENT_LEN" = "__invalid__" ]; then
-  echo "FAIL: signed status response is missing one or more required top-level fields (snapshotVersion, sources, recentNotifications)" >&2
-  cat "$STATUS_BODY_FILE" >&2
-  exit 1
-fi
+# Read snapshotVersion without collapsing null so the empty-state branch below
+# can still recognize it. `jq -r` renders null as `null`, which is the value
+# the next branch compares against.
+SNAPSHOT_VERSION=$(jq -r '.snapshotVersion' "$STATUS_BODY_FILE")
 
 WEATHER_LAST_VALUE=$(jq -r '.sources[] | select(.name == "weather") | .lastValue // empty' "$STATUS_BODY_FILE")
 if [ -n "$WEATHER_LAST_VALUE" ] && [ "$WEATHER_LAST_VALUE" != "null" ]; then
@@ -439,15 +466,21 @@ Create `tests/smoke.test.ts` with:
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+// The package is type: "module" (ESM), so `__dirname` is undefined when this
+// file is evaluated. Derive the module directory from `import.meta.url`
+// instead, which is the canonical ESM-compatible path.
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..');
 const SMOKE_SCRIPT = join(REPO_ROOT, 'scripts', 'smoke.sh');
 
@@ -469,22 +502,34 @@ interface ShimEnv {
   logPath: string;
 }
 
-function setupShims(spec: ShimSpec): ShimEnv {
+function setupShims(): ShimEnv {
   const dir = mkdtempSync(join(tmpdir(), 'agent-smoke-shim-'));
   const binDir = join(dir, 'bin');
+  mkdirSync(binDir, { recursive: true });
   const logPath = join(dir, 'invocations.log');
   writeFileSync(logPath, '');
 
-  for (const [name, shim] of Object.entries(spec)) {
-    const path = join(binDir, name);
-    // Each shim appends the argv and a marker to the log, then runs its scripted
-    // behavior. Args are JSON-encoded so spaces / newlines round-trip cleanly.
-    const body = `#!/usr/bin/env bash
+  // Each shim is a thin bash wrapper that records its argv to a shared log file
+  // and then delegates to a per-scenario behavior fragment. Args are JSON-encoded
+  // via jq -Rsa so spaces, newlines, and JSON round-trip cleanly. The behavior
+  // file is identified by the shim name from the dispatch wrapper.
+  const shimBody = (name: string) => `#!/usr/bin/env bash
 set -e
-echo "$(date +%s%N) ${name} $(printf '%s' "$*" | jq -Rsa .)" >> '${logPath}'
-${shimSource(name, shim)}
+echo "\$(date +%s%N) ${name} \$(printf '%s' "\$*" | jq -Rsa .)" >> '${logPath}'
+if [ -n "\${SHIM_BEHAVIOR_FILE_DIR:-}" ] && [ -d "\${SHIM_BEHAVIOR_FILE_DIR}" ]; then
+  behavior="\${SHIM_BEHAVIOR_FILE_DIR}/${name}.sh"
+  if [ -f "\$behavior" ]; then
+    bash "\$behavior" "\$@"
+    exit \$?
+  fi
+fi
+echo "FAIL: shim ${name} invoked without SHIM_BEHAVIOR_FILE" >&2
+exit 99
 `;
-    writeFileSync(path, body);
+
+  for (const name of ['aws', 'curl', 'sleep']) {
+    const path = join(binDir, name);
+    writeFileSync(path, shimBody(name));
     chmodSync(path, 0o755);
   }
 
@@ -524,7 +569,11 @@ function runSmoke(env: ShimEnv, extraEnv: Record<string, string> = {}): { status
   const proc = spawnSync('bash', [SMOKE_SCRIPT], {
     env: {
       ...process.env,
-      PATH: env.binDir,
+      // Put the shim binDir FIRST so the mocked `aws`/`curl`/`sleep` win over
+      // the real binaries; keep the rest of PATH so bash, jq, mktemp, etc. are
+      // still findable. Timeout is 120s so the retry-exhaustion test can run
+      // its full 75-second budget without the harness killing it.
+      PATH: `${env.binDir}:${env.originalPath}`,
       AWS_REGION: 'us-east-1',
       AWS_PROFILE: 'default',
       SHIM_BEHAVIOR_FILE_DIR: env.dir,
@@ -532,7 +581,7 @@ function runSmoke(env: ShimEnv, extraEnv: Record<string, string> = {}): { status
     },
     cwd: env.originalCwd,
     encoding: 'utf8',
-    timeout: 30_000,
+    timeout: 120_000,
   });
   return {
     status: proc.status ?? -1,
@@ -664,7 +713,15 @@ exit 0
 
     expect(result.status).toBe(0);
     const calls = parseInvocations(env);
-    expect(calls.some((c) => c.name === 'curl')).toBe(true);
+    // Exactly two curl probes in order: the unsigned one first (asserts the
+    // AWS_IAM boundary), then the signed one (asserts the read path). A
+    // regression that signs both requests, or removes the unsigned probe,
+    // would still pass `calls.some((c) => c.name === 'curl')` — the stricter
+    // call-order + signing checks below pin that gap shut.
+    const curlCalls = calls.filter((c) => c.name === 'curl');
+    expect(curlCalls).toHaveLength(2);
+    expect(curlCalls[0].args.includes('--aws-sigv4')).toBe(false);
+    expect(curlCalls[1].args.includes('--aws-sigv4')).toBe(true);
     // Read-only invariant: aws is only ever invoked with describe-stacks /
     // export-credentials, NEVER with `lambda invoke` and never with the literal
     // fetch payload.
@@ -1012,8 +1069,8 @@ Expected: PASS for all three. The full vitest run includes both new suites (`tes
 
 - [ ] **Step 2: Verify CDK synthesizes cleanly**
 
-Run: `npx cdk synth --app "npx tsx infra/stack.ts" 2>&1 | head -20`
-Expected: a JSON-ish template output, no errors. Use `--app "npx tsx infra/stack.ts"` because the project uses `tsx` for the CDK app entry. (If `npx tsx` is not on PATH inside this shell, run `DISCORD_WEBHOOK_URL=https://discord.example/webhook npx cdk synth --app "npx tsx infra/stack.ts"` so the synth-time check in `infra/stack.ts` does not throw.)
+Run: `set -o pipefail; if synth=$(DISCORD_WEBHOOK_URL=https://discord.example/webhook npx cdk synth --app "npx tsx infra/app.ts" 2>&1 | head -20); then echo "synth ok"; else echo "$synth"; exit 1; fi`
+Expected: a JSON-ish template output, no errors. Use `--app "npx tsx infra/app.ts"` because the project uses `tsx` for the CDK app entry, and `infra/app.ts` is the dedicated CLI entrypoint (the test/CDK import of `infra/stack.ts` has no side effects). The `if synth=$(...); then ... else echo $synth; exit 1; fi` pattern preserves the `cdk synth` exit status — `npx cdk synth ... | head -20` would otherwise return `head`'s status (always 0 once the pipe broke), hiding a failed synth. The `DISCORD_WEBHOOK_URL=...` prefix is the webhook the synth-time check in `infra/stack.ts` requires.
 
 - [ ] **Step 3: Verify the script still parses**
 

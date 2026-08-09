@@ -8,7 +8,6 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { type Construct } from 'constructs';
 
-const STACK_NAME = 'SqliteS3AgentTutorial';
 const IMAGE_DIR = '.';
 
 interface AgentStackProps extends cdk.StackProps {
@@ -214,17 +213,3 @@ function parseReservedConcurrency(raw: string | undefined): number {
   }
   return parsed;
 }
-
-// ---- App entry point ----
-
-const app = new cdk.App();
-
-new AgentStack(app, STACK_NAME, {
-  env: {
-    ...(process.env.CDK_DEFAULT_ACCOUNT ? { account: process.env.CDK_DEFAULT_ACCOUNT } : {}),
-    region: process.env.CDK_DEFAULT_REGION ?? 'us-east-1',
-  },
-  ...(process.env.BEDROCK_MODEL_ID ? { bedrockModelId: process.env.BEDROCK_MODEL_ID } : {}),
-  ...(process.env.WEATHER_LOCATION ? { weatherLocation: process.env.WEATHER_LOCATION } : {}),
-  ...(process.env.FETCH_TRIGGER_TOKEN ? { fetchTriggerToken: process.env.FETCH_TRIGGER_TOKEN } : {}),
-});

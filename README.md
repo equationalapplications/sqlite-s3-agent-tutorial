@@ -96,18 +96,50 @@ FETCH_TRIGGER_TOKEN=...` before `npm run deploy`, alongside `DISCORD_WEBHOOK_URL
 the token goes on the query string (`?token=...`) and `op` goes in the JSON body —
 `resolveOp` in `src/handler.ts` only reads `op` from the top-level payload or the JSON
 `body`, and the token check reads `queryStringParameters.token`, so putting the token in
-the body or `op` on the query string will not work:
+the body or `op` on the query string will not work. Reusing the same `netrc` machinery
+as the smoke script handles the access key / secret pair cleanly; `aws configure
+export-credentials --format process` resolves SSO / session credentials too, and the
+`X-Amz-Security-Token` header is added when the resolved credentials include a session
+token:
 
 ```bash
+FUNCTION_URL=$(aws cloudformation describe-stacks \
+  --profile "$AWS_PROFILE" --region "$AWS_REGION" \
+  --stack-name SqliteS3AgentTutorial \
+  --query "Stacks[0].Outputs[?OutputKey=='AgentFunctionUrl'].OutputValue" --output text)
+
+# Build a 0600 netrc file from the resolved credential chain (env vars, SSO,
+# credential_process, etc.). Unlike `aws configure get`, this handles every
+# profile type the CLI supports.
+NETRC=$(mktemp); chmod 600 "$NETRC"
+FUNCTION_HOST=$(echo "$FUNCTION_URL" | sed -E 's#^https?://([^/]+).*#\1#')
+CREDENTIALS=$(aws configure export-credentials --profile "$AWS_PROFILE" --format process)
+printf 'machine %s login %s password %s\n' \
+  "$FUNCTION_HOST" \
+  "$(jq -r '.AccessKeyId' <<<"$CREDENTIALS")" \
+  "$(jq -r '.SecretAccessKey' <<<"$CREDENTIALS")" > "$NETRC"
+
+# Session token (SSO / assumed-role) is required by SigV4 when present.
+SESSION_TOKEN=$(jq -r '.SessionToken // empty' <<<"$CREDENTIALS")
+if [ -n "$SESSION_TOKEN" ]; then
+  TOKEN_FILE=$(mktemp); chmod 600 "$TOKEN_FILE"
+  printf 'X-Amz-Security-Token: %s\n' "$SESSION_TOKEN" > "$TOKEN_FILE"
+  SESSION_HEADER=(--header @"$TOKEN_FILE")
+fi
+
 curl -X POST "$FUNCTION_URL?token=$FETCH_TRIGGER_TOKEN" \
   --aws-sigv4 "aws:amz:$AWS_REGION:lambda" \
-  --user "$(aws configure get aws_access_key_id):$(aws configure get aws_secret_access_key)" \
+  --netrc-file "$NETRC" \
+  --header 'Content-Type: application/json' \
+  "${SESSION_HEADER[@]}" \
   --data '{"op":"fetch"}'
 ```
 
-Without a matching token, an HTTP-triggered `fetch` request is rejected with 403; the
-scheduled EventBridge fetch is unaffected either way. Since anyone with a valid token *and*
-IAM access can run this repeatedly (a real Bedrock call and Discord post each time), see
+Without a matching token *or* an authorized same-account IAM principal, an HTTP-triggered
+`fetch` request is rejected with 403; the scheduled EventBridge fetch is unaffected either
+way. Both checks are required — the token alone no longer suffices, and the IAM grant
+alone without a token is treated the same as no token. Since an authorized caller with a
+valid token can run this repeatedly (a real Bedrock call and Discord post each time), see
 [docs/07-budget-protection.md](docs/07-budget-protection.md) before relying on this in a
 deploy you leave running unattended.
 
@@ -127,11 +159,11 @@ If two Lambda functions invoke concurrently and attempt to mutate state:
 
 If your agent outgrows a single-writer schedule and requires concurrent read/write access, choose one of the following paths depending on your infrastructure preferences:
 
-#### 1. EFS Mount: The Zero-Server Alternative (Recommended)
+#### 1. EFS Mount: The Zero-Server Alternative (Single-Writer Only With Care)
 If you want to keep using SQLite without managing a traditional database server, attach an **Amazon EFS (Elastic File System)** to your Lambda function.
 * **How it works:** AWS mounts an EFS network drive directly to `/mnt/storage` inside your Lambda container.
-* **The Benefit:** SQLite can read and write to the same `.db` file across hundreds of concurrent Lambda instances. True file-level locking is natively handled by EFS.
-* **Trade-off:** Requires moving your Lambda function into a VPC, which introduces minimal network configuration overhead.
+* **The Benefit:** A single Lambda can `hydrate-from-EFS` instead of S3, eliminating the per-invocation S3 download.
+* **Trade-off:** Requires moving your Lambda function into a VPC, which introduces minimal network configuration overhead. **EFS is not a true multi-writer substitute for a relational database.** EFS exposes NFSv4 advisory locking only; SQLite's `WAL` mode requires POSIX shared memory that no network filesystem provides, and concurrent writers across multiple Lambda hosts risk 'database is locked' errors and (in failure cases) corruption. The hydrating-Lambda pattern (one writer at a time, S3 as the truth) is the only SQLite-on-Lambda shape the tutorial guarantees. If you genuinely need concurrent writers, skip EFS and pick a client/server database.
 
 #### 2. Litestream / Litefs: The Replication Stream
 [Litestream](https://litestream.io) runs a background sidecar process alongside SQLite that continuously streams WAL (Write-Ahead Log) frames to an S3 bucket every second.

@@ -223,5 +223,6 @@ The implementation is complete when all of the following pass:
 - [x] The shell harness asserts in every scenario that `aws lambda invoke` and the `fetch` payload are never sent.
 - [x] The CDK synth suite asserts `AuthType: AWS_IAM` on the `AWS::Lambda::Url` resource, both URL invocation permissions, and the unchanged EventBridge state.
 - [x] `npm run typecheck`, `npm run build`, and `cdk synth` complete cleanly.
-- [x] `npm run smoke` runs to completion immediately after `npm run deploy` (no fetch, `200` empty state, exit 0) and while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Live post-deploy check is an operator action; pre-deploy verifications all pass.)*
+- [x] `npm run smoke` runs to completion immediately after `npm run deploy` (no fetch, `200` empty state, exit 0) and while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Pre-deploy verification: the shell harness in `tests/smoke.test.ts` exercises every branch with stubbed `aws`/`curl`/`sleep` and asserts the read-only invariant — see §5.1.)*
+- [ ] `npm run smoke` runs to completion immediately after `npm run deploy` (no fetch, `200` empty state, exit 0) and while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Live post-deploy check is an operator action; pre-deploy verifications all pass.)*
 - [x] README and `docs/01-architecture.md`, `docs/02-rehydration.md`, `docs/07-budget-protection.md` describe the Function URL as IAM-authenticated and note the on-demand token as defense in depth.

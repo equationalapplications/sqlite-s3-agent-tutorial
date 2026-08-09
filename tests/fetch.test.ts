@@ -686,4 +686,37 @@ describe('buildFinalMessageForDiscord', () => {
     expect(result.startsWith(preMessage)).toBe(true);
     expect(result.endsWith('...\n\n')).toBe(true);
   });
+
+  // Boundary checks for the limit parameter. Without these, limits below
+  // TRAILING_BLANK.length (i.e. 0 or 1) cause slice(0, negative) to return the
+  // original string, so the helper would silently exceed the requested limit.
+  it('rejects limit < TRAILING_BLANK.length with a RangeError', () => {
+    for (const badLimit of [0, 1]) {
+      expect(() => buildFinalMessageForDiscord('hello', null, badLimit)).toThrow(
+        RangeError,
+      );
+      expect(() => buildFinalMessageForDiscord('hello', null, badLimit)).toThrow(
+        /must be an integer >= 2/,
+      );
+    }
+  });
+
+  it('rejects non-integer limits with a RangeError', () => {
+    expect(() => buildFinalMessageForDiscord('hello', null, 1.5)).toThrow(
+      RangeError,
+    );
+    expect(() => buildFinalMessageForDiscord('hello', null, 1.5)).toThrow(
+      /must be an integer >= 2/,
+    );
+    expect(() => buildFinalMessageForDiscord('hello', null, NaN)).toThrow(
+      RangeError,
+    );
+  });
+
+  it('accepts limit equal to TRAILING_BLANK.length', () => {
+    // limit=2 → effectiveLimit=0 → ??→ `preMessage.slice(0, 0) + TRAILING_BLANK`.
+    const result = buildFinalMessageForDiscord('hello', null, 2);
+    expect(result).toBe('\n\n');
+    expect(result.length).toBe(2);
+  });
 });
