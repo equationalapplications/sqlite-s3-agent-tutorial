@@ -41,6 +41,15 @@ Reserved concurrency 1 means only one invocation of this function runs at a time
 race can't happen at all. The conditional write is a second line of defense that also
 protects against an out-of-band `aws s3 cp` — belt and suspenders.
 
+## Bedrock calls: formatting and embedding
+
+Between the value fetch and the Discord post, the writer calls Amazon Bedrock's Converse
+API to turn the raw value into a friendly message, and a second, smaller Bedrock round
+trip — Titan Text Embeddings V2, via `InvokeModel` rather than `Converse` — embeds each
+posted notification into a `sqlite-vec` table inside the same `memory.db` file, so the
+writer can mention the closest same-source past result in the prompt above; see
+[docs/08-rag-vector-search.md](08-rag-vector-search.md).
+
 ## EventBridge's payload
 
 The schedule's `Input` is the literal string `{"op":"fetch"}`, not a transformed event.

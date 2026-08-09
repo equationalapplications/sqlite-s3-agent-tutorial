@@ -4,7 +4,10 @@ A working example of the **SQLite-as-a-database-for-an-agent-on-AWS, rehydrated-
 pattern: a Discord bot that checks the weather and Bitcoin price once a day, asks an LLM
 (Amazon Bedrock) to turn the raw value into a friendly message, posts it to a Discord
 webhook, and remembers what it already posted — all state lives in a single SQLite file
-in S3. No database server, no VPC.
+in S3. No database server, no VPC. The same file also doubles as a vector database: each
+posted message gets embedded (Titan Text Embeddings V2) and searched with `sqlite-vec`,
+so the bot can mention the closest past result — see
+[docs/08-rag-vector-search.md](docs/08-rag-vector-search.md).
 
 ## Quick start
 
@@ -66,6 +69,7 @@ deploy you leave running unattended.
 | [docs/04-extending.md](docs/04-extending.md) | Adding a third source |
 | [docs/05-from-tutorial-to-prod.md](docs/05-from-tutorial-to-prod.md) | What changes if you outgrow this |
 | [docs/07-budget-protection.md](docs/07-budget-protection.md) | Setting up an AWS Budget alert, and what could actually drive cost up |
+| [docs/08-rag-vector-search.md](docs/08-rag-vector-search.md) | SQLite as a vector database too: sqlite-vec + Titan embeddings |
 
 ## Cost
 
