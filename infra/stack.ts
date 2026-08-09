@@ -84,7 +84,7 @@ class AgentStack extends cdk.Stack {
       }),
       architecture: lambda.Architecture.ARM_64,
       memorySize: 512,
-      timeout: cdk.Duration.seconds(30),
+      timeout: cdk.Duration.seconds(60),
       // Single-writer invariant (spec §2): without this, two overlapping `fetch`
       // invocations could both hydrate the same version and silently overwrite each
       // other's writes. Reader-overridable via RESERVED_CONCURRENCY env at synth time.
@@ -124,9 +124,9 @@ class AgentStack extends cdk.Stack {
 
     // Constant JSON input, not a transformed event payload (spec §2): the handler reads
     // event.op directly without unwrapping EventBridge's own envelope shape.
-    new events.Rule(this, 'FetchSchedule', {
+    const fetchSchedule = new events.Rule(this, 'FetchSchedule', {
       enabled: true,
-      schedule: events.Schedule.rate(cdk.Duration.days(1)),
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
       targets: [
         new targets.LambdaFunction(agentFunction, {
           event: events.RuleTargetInput.fromObject({ op: 'fetch' }),
@@ -143,6 +143,7 @@ class AgentStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SnapshotBucketName', { value: bucket.bucketName });
     new cdk.CfnOutput(this, 'AgentFunctionName', { value: agentFunction.functionName });
     new cdk.CfnOutput(this, 'AgentFunctionUrl', { value: functionUrl.url });
+    new cdk.CfnOutput(this, 'LoopRuleName', { value: fetchSchedule.ruleName });
   }
 }
 
