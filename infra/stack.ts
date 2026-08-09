@@ -133,7 +133,7 @@ export class AgentStack extends cdk.Stack {
     // out of scope (design §8); per-user auditability is a future spec.
     functionUrl.grantInvokeUrl(new iam.AccountPrincipal(this.account));
 
-    // ---- EventBridge schedule (op: fetch, once a day) ----
+    // ---- EventBridge schedule (op: fetch, every 5 minutes) ----
 
     // Constant JSON input, not a transformed event payload (spec §2): the handler reads
     // event.op directly without unwrapping EventBridge's own envelope shape.

@@ -1,7 +1,8 @@
 # Architecture
 
 One Lambda function. Two operations, read as `event.op`: `fetch` (the writer, run on a
-5-minute EventBridge schedule) and `status` (the reader, exposed by a Function URL locked
+5-minute EventBridge schedule — see the README's Loop mode section) and `status` (the
+reader, exposed by a Function URL locked
 to `authType: AWS_IAM`). Both read and write the same single SQLite file that lives
 durably in one S3 object, but each keeps its own transient copy in `/tmp` for the
 lifetime of the execution environment: the writer at `${DB_PATH}` (default
@@ -19,8 +20,10 @@ of that IAM grant, not a substitute for it.
 ## Why one file in S3 instead of a database server
 
 A database server (RDS, DynamoDB) needs to exist continuously, whether or not anything is
-happening. This bot runs once a day. Provisioning a server for a workload that is asleep
-99.9% of the time is the wrong trade — you're paying for uptime a cron job doesn't need.
+happening. This bot runs on a 5-minute schedule, and each tick's actual work — a couple of
+API calls, a Bedrock round trip, a Discord post — takes a few seconds. Provisioning a
+server for a workload that is asleep the overwhelming majority of the time is the wrong
+trade — you're paying for uptime a cron job doesn't need.
 SQLite has no server: it's a file format and a library. The only question the "SQLite for
 a stateful Lambda" pattern has to answer is "where does the file live between
 invocations, given Lambda's `/tmp` doesn't survive a cold start?" S3 is the answer:
@@ -50,13 +53,15 @@ protects against an out-of-band `aws s3 cp` — belt and suspenders.
 
 ## Bedrock calls: formatting and embedding
 
-Before formatting, the writer makes a small Bedrock round trip — Titan Text Embeddings
-V2, via `InvokeModel` rather than `Converse` — to embed the raw fetched value and search
-a `sqlite-vec` table inside the same `memory.db` file for the closest same-source past
-notification, so the formatter can fold that match into its prompt. Only after the
-formatted message is posted to Discord does the writer embed and store *that* posted
-notification, via the same Titan call, for future lookups; see
-[docs/08-rag-vector-search.md](08-rag-vector-search.md).
+Each tick makes exactly two Bedrock calls. First, `Converse` against the chat model
+formats all of that tick's readings into one combined message (a friendly comment plus a
+closing haiku) — the LLM is never told about past history. Second, Titan Text Embeddings
+V2, via `InvokeModel` rather than `Converse`, embeds that formatted output once; the
+writer reuses the same vector both to search `agent_embeddings` (a `sqlite-vec` table
+inside `memory.db`) for the closest past tick, across all sources, and to store this
+tick's own vector for future lookups. If a match is found, its text is appended
+mechanically as a "Reminds me of" suffix *after* the Discord post is built — the LLM
+never sees or influences it; see [docs/08-rag-vector-search.md](08-rag-vector-search.md).
 
 ## EventBridge's payload
 

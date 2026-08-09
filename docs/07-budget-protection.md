@@ -8,12 +8,12 @@ often than intended.
 ## What can actually drive cost up
 
 - **A leaked or brute-forced `FETCH_TRIGGER_TOKEN` *combined with* an authorized IAM
-  principal.** The on-demand HTTP fetch trigger
-  (`?op=fetch&token=...` on the Function URL — see the README's Quick start) runs a real
-  Bedrock call and a real Discord post per request. Reaching the handler at all now
-  requires SigV4-signing from a principal the stack's URL grant covers
+  principal.** The on-demand HTTP fetch trigger (`?token=...` on the Function URL, with
+  `{"op":"fetch"}` as the JSON body — see the README's "Triggering a fetch on demand"
+  section) runs a real Bedrock call and a real Discord post per request. Reaching the
+  handler at all requires SigV4-signing from a principal the stack's URL grant covers
   (`functionUrl.grantInvokeUrl` in `infra/stack.ts` — same account by default); the
-  token alone is no longer sufficient. With both in hand, an attacker can invoke as
+  token alone is not sufficient. With both in hand, an attacker can invoke as
   often as the Lambda's `reservedConcurrentExecutions: 1` allows — sequentially, but with
   no rate limit otherwise.
 - **`RESERVED_CONCURRENCY` raised above 1, plus EventBridge retries re-enabled.**

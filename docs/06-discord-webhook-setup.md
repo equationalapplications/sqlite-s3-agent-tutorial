@@ -54,9 +54,10 @@ Where `.env` contains:
 DISCORD_WEBHOOK_URL='https://discord.com/api/webhooks/<id>/<token>'
 ```
 
-When deploying via CDK, do the same — `infra/stack.ts` reads `DISCORD_WEBHOOK_URL`
-at synth time (lines 55-63) and embeds it as a Lambda environment variable, so the
-value should never appear on a command line that gets logged or shared:
+When deploying via CDK, do the same — `infra/stack.ts`'s `AgentStack` constructor reads
+`DISCORD_WEBHOOK_URL` from `process.env` at synth time and embeds it as a Lambda
+environment variable, so the value should never appear on a command line that gets logged
+or shared:
 
 ```bash
 # CI / local deploy — source from a secret store or masked CI variable, then deploy:

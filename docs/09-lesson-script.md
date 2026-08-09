@@ -43,33 +43,36 @@ The KNN call lives on the **writer** side — only the writer loads `sqlite-vec`
 
 ## Lesson 2 — The augmented loop
 
-The choreography. Per source, per `fetch` run:
+There is no dedup in this tutorial — every `fetch` tick posts, deliberately (see
+[03-schema.md](03-schema.md)). RAG operates once per *tick*, over the combined
+readings from every source, not once per source:
 
 ```
-rawValue = fetch()
-if rawValue === lastValue: continue                  # unchanged, dedup still rules
+readings = [fetch(source) for source in sources]     # all sources, one tick
 
-queryVector = titanEmbed(rawValue)                   # NEW (search-side embed)
-match = findNearestMatch(db, source, queryVector)    # NEW (returns null if no history)
+preMessage = bedrockFormat(readings)                 # ONE Converse call, no history involved
 
-formatted = bedrockFormat(source, rawValue, match)   # match folded into prompt
-post(formatted)
+preVector = titanEmbed(preMessage)                   # NEW — one Titan call, reused below
+match = findNearestMatch(db, preVector)               # NEW (global KNN, returns null if no history)
 
-notificationId = INSERT agent_notifications (
-  ..., nearest_match_id, nearest_match_distance      # NEW columns
-)
+finalMessage = buildFinalMessageForDiscord(preMessage, match?.baseMessage)  # mechanical suffix
+post(finalMessage)
 
-storeVector = titanEmbed(formatted)                  # NEW (store-side embed)
-INSERT agent_embeddings (notification_id, storeVector)  # NEW
+for source in readings:
+  notificationId = INSERT agent_notifications (
+    ..., formatted_message=finalMessage, base_message=preMessage,
+    nearest_match_id, nearest_match_distance          # NEW columns, same values for every source this tick
+  )
+  INSERT agent_embeddings (notificationId, preVector)  # NEW — reuses preVector, no second Titan call
 ```
 
 Read this slowly. Three properties to land:
 
-1. **The dedup check still comes first.** Unchanged values never reach the embedding calls. The model — both the chat model *and* Titan — is paid for only when there's something new to say. The same invariant the base spec enforces for the LLM format call now extends to embedding calls. If you skip dedup and embed every fetch, you triple the API cost for nothing.
+1. **One format call, one embed call, per tick — not per source.** The chat model sees every source's reading in one prompt and writes one combined message. That same message is embedded exactly once; the vector is reused both to search for a match and to store this tick's own entry. There is no per-source Bedrock or Titan call anywhere in this loop.
 
-2. **Two Titan calls per posted notification, not one.** Search-side embeds the *raw value* (the formatted message doesn't exist yet). Store-side embeds the *formatted message* (it's richer text by the time we get there, and Titan famously embeds "a sunny 72°F afternoon" more usefully than "72F"). Both go through the same 256-dim Titan model, so they share a vector space and can be compared.
+2. **The chat model is never told about the match.** Unlike a classic RAG design, `bedrockFormat` above takes no `match` argument — the model formats `readings` with zero knowledge of history. The suffix is pure string concatenation, applied by `buildFinalMessageForDiscord` *after* the Converse call returns. This is a deliberate simplification (Lesson 6 explains why).
 
-3. **The two new columns are written once, at insert time, never updated.** Just like `agent_runs.outcome`/`error` in the base schema: absence is meaningful (first observation, or the embedding step failed), not a placeholder.
+3. **The two new columns are written once, at insert time, never updated.** Just like `agent_runs.outcome`/`error` in the base schema: absence is meaningful (first tick ever, or the embed/match step failed), not a placeholder. Every source's row from the same tick gets the same `nearest_match_id`/`nearest_match_distance`, because there's only one match per tick, not one per source.
 
 The implementation lives in `src/agent/fetch.ts`.
 
@@ -80,10 +83,10 @@ The implementation lives in `src/agent/fetch.ts`.
 
 There are two distinct upstream causes that produce the same null:
 
-1. The source has no prior notifications yet (first-ever observation).
-2. The query-embed or match step failed and was isolated by the per-source `try/catch`.
+1. This is the first tick ever (no prior notifications to match against).
+2. The embed-or-match step failed and was isolated by the tick-level `try/catch`.
 
-The doc deliberately collapses both into the same null. They have identical downstream behavior: no similarity line in the prompt, both columns `NULL` in the inserted row, `nearestMatch: null` in the status endpoint. From any consumer's perspective, "nothing to mention" is the correct behavior in both cases.
+The doc deliberately collapses both into the same null. They have identical downstream behavior: no suffix on the posted message, both columns `NULL` in every inserted row, `nearestMatch: null` in the status endpoint. From any consumer's perspective, "nothing to mention" is the correct behavior in both cases.
 
 </details>
 
@@ -100,14 +103,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS agent_embeddings USING vec0(
   embedding        FLOAT[256] distance_metric=cosine
 );
 
--- 2. Two new nullable columns on the existing table
+-- 2. Three new nullable columns on the existing table
 ALTER TABLE agent_notifications ADD COLUMN nearest_match_id INTEGER REFERENCES agent_notifications(id);
 ALTER TABLE agent_notifications ADD COLUMN nearest_match_distance REAL;
+ALTER TABLE agent_notifications ADD COLUMN base_message TEXT;
 ```
+
+`base_message` stores the LLM's pre-suffix output — the text that was actually embedded and that a future match's suffix is built from. It's what makes the suffix mechanical rather than model-driven (Lesson 6) and what stops the suffix from snowballing across ticks (a suffix built from `formatted_message` would quote a message that may itself already carry a suffix).
 
 Three things to internalize:
 
-**A. One vector table across all sources.** Sources are a closed vocabulary maintained in exactly one place — `SOURCE_NAMES` in `src/db/schema.ts`. A per-source vector table would mean a second place to edit every time you add a source (a schema edit *and* a new virtual table). That breaks the invariant the base spec established in [04-extending.md](04-extending.md). Same-source filtering happens in app code instead — Lesson 5.
+**A. One vector table across all sources.** Sources are a closed vocabulary maintained in exactly one place — `SOURCE_NAMES` in `src/db/schema.ts`. A per-source vector table would mean a second place to edit every time you add a source (a schema edit *and* a new virtual table). That breaks the invariant the base spec established in [04-extending.md](04-extending.md). There is no per-source filtering anywhere — the match is global across all sources, by design (Lesson 5).
 
 **B. 256 dimensions, not 1024.** Titan V2 supports 256/512/1024 and is *explicitly tuned* to keep retrieval quality at 256. For a tutorial's corpus — a handful of rows per source, growing by at most a few a day — 1024 is overkill, and smaller vectors keep the storage and query cost visibly small. Deliberate teaching choice; the doc tells you why.
 
@@ -167,81 +173,76 @@ If Titan is having a sustained outage, exponential backoff just delays the inevi
 ```typescript
 export function findNearestMatch(
   db: Database.Database,
-  source: SourceName,
   queryVector: number[],
 ): NearestMatch | null;
 ```
 
-The body runs:
+Note what's *not* a parameter: `source`. The match is global across every source, not scoped to the tick's own sources. The body runs:
 
 ```sql
-SELECT notification_id, distance
-FROM agent_embeddings
-WHERE embedding MATCH ? AND k = 50
-ORDER BY distance;
+SELECT n.id, n.base_message, n.posted_at, e.distance
+FROM agent_embeddings e
+JOIN agent_notifications n ON n.id = e.notification_id
+WHERE e.embedding MATCH ? AND k = 50
+  AND n.base_message IS NOT NULL
+ORDER BY e.distance;
 ```
 
-Then it joins the result to `agent_notifications`, filters down to the requested `source`, and returns the closest survivor — or `null` if the source has no prior rows at all, or none survived the filter.
+...and returns the closest row, or `null` if nothing survives (no history yet, or every candidate predates the `base_message` column and is filtered out by the `IS NOT NULL` guard).
 
 Three things to internalize:
 
-**A. `k = 50` is a fixed constant.** The doc is explicit: this is a known ceiling, not engineered for arbitrary scale. 50 rows is ~7 weeks of history across two sources at one post per source per day. Past that ceiling, `findNearestMatch` *can* miss the true nearest same-source neighbor — because it's a KNN over *all sources*, then an app-level filter, not a source-scoped KNN. For this tutorial that's fine.
+**A. `k = 50` is a fixed constant.** The doc is explicit: this is a known ceiling, not engineered for arbitrary scale. At the loop's 5-minute cadence (2 sources, 1 row per source per tick), 50 candidates is roughly two hours of wall-clock history — generous for this tutorial's short-lived intended test runs (5–10 minutes), but a real ceiling if the loop runs for days. Past it, `findNearestMatch` can miss the true nearest neighbor if it isn't among the 50 closest.
 
-**B. The same-source filter is in app code, not SQL.** The price of "one table across all sources." The benefit: adding a new source requires editing exactly one place (`SOURCE_NAMES`). The cost: KNN scans can return up to 50 rows that get filtered away. At this corpus size, free. At a million-row corpus, you'd want partition-key support, which exists in `sqlite-vec` but the spec calls out as "noted as a future option once verified stable."
+**B. There is no per-source filter, in SQL or in app code.** The match is "the most similar past tick," full stop — a crypto tick can match a weather tick's phrasing. This is *not* an oversight, it's the design: same-source matching would need a partition key, which `sqlite-vec` supports but this tutorial doesn't wire up (would need a migration + backfill for a scale this tutorial never reaches).
 
-**C. The asymmetry from Lesson 2, restated.** Query-side embeds the *raw value* (chicken and egg — the formatted message doesn't exist yet). Store-side embeds the *formatted message* (it exists now and it's richer text). Both go through the same 256-dim Titan model with `normalize: true`, so they share a vector space. This works because Titan doesn't require its inputs to share a style, just a language.
+**C. Query and store now use the same text.** Both the search vector and the stored vector come from `preMessage` (Lesson 2) — there is no raw-value-vs-formatted-message asymmetry anymore. `WHERE n.base_message IS NOT NULL` exists purely so pre-migration rows (from before `base_message` was added) don't surface as candidates whose joined text is `NULL`.
 
 There's also `insertEmbedding` — straightforward, takes a notification id and a vector, writes the row. Nothing in this module validates the vector's dimension; that's enforced at the embed layer (Titan returns 256-dim vectors for the configured model).
 
-**Check-in question:** imagine the corpus has grown to 200 rows per source and a real production outage is happening because matches are missing. What's the smallest change you'd make, and what's the bigger architectural change that would actually fix it permanently?
+**Check-in question:** imagine the loop has been running unattended for a week and a real outage is happening because matches are missing. What's the smallest change you'd make, and what's the bigger architectural change that would actually fix it permanently?
 
 <details>
 <summary>Expected reasoning</summary>
 
-Smallest change: bump `k` from 50 to 500 in `findNearestMatch`. That's a one-line change, but it doesn't scale — it just buys you time.
+Smallest change: bump `k` from 50 to something larger (e.g. 2000, roughly a week of 5-minute ticks) in `findNearestMatch`. That's a one-line change, but it doesn't scale indefinitely — it just buys headroom.
 
-Permanent fix: move the same-source filter into the vector query itself, using `sqlite-vec`'s partition-key columns. That requires a migration (a new column on `agent_embeddings`, a backfill of partition keys for existing rows, and a switch in the query). The spec explicitly leaves this as "out of scope / future option" because the tutorial's corpus never hits the ceiling — and the doc tells you what the ceiling is and what to do when you hit it.
+Permanent fix, if same-source matching is ever wanted: move a source filter into the vector query itself, using `sqlite-vec`'s partition-key columns. That requires a migration (a new column on `agent_embeddings`, a backfill of partition keys for existing rows, and a switch in the query). The current design leaves this out of scope because global matching across sources is the deliberate choice, not a stopgap.
 
 </details>
 
 ---
 
-## Lesson 6 — `format()` extended, not replaced
+## Lesson 6 — The suffix is mechanical, not model-driven
 
-The base tutorial's `format()` signature was:
+An earlier design considered folding the match into the LLM's prompt — "here's what you said last time, mention it if relevant." The shipped design doesn't do that. `MessageFormatter.format(ctx: LoopContext)` (`src/format/types.ts`) takes no match parameter at all, and `SYSTEM_PROMPT` in `src/format/bedrock.ts` says nothing about history. The model formats `readings` and nothing else.
 
-```typescript
-format(source: SourceName, rawValue: string): Promise<string>
-```
-
-The RAG extension makes it:
+The suffix is built entirely *after* the Converse call returns, in `src/agent/fetch.ts`'s `buildFinalMessageForDiscord`:
 
 ```typescript
-format(source: SourceName, rawValue: string, nearestMatch?: NearestMatch | null): Promise<string>
+function buildFinalMessageForDiscord(
+  preMessage: string,
+  baseMessage: string | null,   // match?.baseMessage, or null
+  limit = 2000,
+): string
 ```
 
-When `nearestMatch` is present, `buildUserPrompt` appends exactly one line:
-
-```
-Closest past reading (<ISO date from postedAt>): "<formattedMessage>"
-```
-
-And `SYSTEM_PROMPT` gains one sentence telling the model it *may* naturally reference the line if relevant, without being required to.
+If `baseMessage` is non-null, it appends `"\n\nReminds me of: <baseMessage>"` — clipped if necessary to respect Discord's 2000-character cap, omitted entirely if there's no room even for the separator. This is string concatenation, not a prompt engineering technique.
 
 Three things to internalize:
 
-**1. No second Bedrock call.** This rides the same Converse request that already formats today's value. The marginal cost of "mention the past" is a few extra tokens in the prompt — not a second model invocation. Deliberate: the tutorial is teaching the *vector* piece, not the *multi-turn* piece. If you wanted multi-turn ("the model calls a tool, retrieves a match, decides whether to mention"), you'd be teaching agents, not RAG.
+**1. No second Bedrock call, and no first one either that knows about history.** The marginal cost of "mention the past" is one extra Titan call (already counted in Lesson 2) — not a second Converse invocation, and not extra tokens in the chat prompt. The chat model is completely unaware RAG exists.
 
-**2. The model is told it *may*, not *must*.** Important for testability. If the model were told it *must* reference the match, the test suite would have to assert on LLM-generated text — flaky. With "may reference," the test suite can assert that the prompt *contains* the line and that the formatted message *can* be produced — but never has to assert that the model actually wrote "last Tuesday's reading!" in its output. The unit of behavior under test is "did the prompt get built correctly," not "did the LLM do something specific with the prompt."
+**2. Testability, not flakiness.** Because the suffix is mechanical, the test suite can assert the exact output byte-for-byte: given a `preMessage` and a `baseMessage`, `buildFinalMessageForDiscord` returns exactly one string. No LLM-generated text ever needs to be asserted against — `tests/fetch.test.ts` covers `buildFinalMessageForDiscord` as pure unit tests with hardcoded inputs.
 
-**3. `LocalTemplateFormatter` accepts and ignores.** Same pattern as the Phase 1 no-AWS path: it accepts the new parameter to keep the interface consistent, but it doesn't use it. Load-bearing pattern: type compatibility across all formatters, real behavior on whichever one is wired up.
+**3. This also solves the snowball problem.** The suffix quotes `base_message`, never `formatted_message` — see Lesson 3 and [08-rag-vector-search.md](08-rag-vector-search.md). Had the model been asked to "mention" the match inside its own output, that output (now containing a nested quote) would become tomorrow's `base_message`, and the chain would grow every tick it got matched again.
 
-**Check-in question:** why is the match appended to the *user* prompt (with the formatted message text), not just stashed somewhere the model can find it later?
+**Check-in question:** what would go wrong if `buildFinalMessageForDiscord` built its suffix from `match.formattedMessage` instead of `match.baseMessage`?
 
 <details>
 <summary>Expected reasoning</summary>
 
-Chat models attend to everything in the context window, but they attend *most strongly* to recent and explicit content. Stuffing the match into the system prompt dilutes it with the persona/role instructions; putting it into a tool result or a separate channel doesn't exist in Converse's simple request shape; embedding it directly into the user prompt alongside today's value gives it the best chance of being referenced naturally. The cost is a few extra tokens in the prompt, which is negligible against the model context.
+`formattedMessage` is the *already-suffixed* text that was actually posted — if tick N matched tick N-1, tick N's `formatted_message` already contains `"Reminds me of: <tick N-2's text>"`. Using `formattedMessage` for tick N+1's suffix would nest that whole string inside a new `"Reminds me of: ..."` wrapper, and the pattern repeats: each match quotes everything before it, unbounded, until `buildFinalMessageForDiscord`'s own clipping logic mangles it mid-sentence to fit under 2000 characters. Using `base_message` — the LLM's own pre-suffix output — means every quoted match is exactly one tick's worth of text, no matter how many times it's been matched before.
 
 </details>
 
@@ -251,31 +252,32 @@ Chat models attend to everything in the context window, but they attend *most st
 
 The lesson I think is the most important for a tutorial reader, because the principle generalizes far beyond this feature.
 
-`runFetch` in `src/agent/fetch.ts` already has a per-source `try/catch` covering fetch, format, and post failures. The RAG extension adds *three* more failure points inside that same `try/catch`:
+`runFetch` in `src/agent/fetch.ts` has per-source `try/catch` around each source's *fetch* call, but RAG's failure points are tick-level, not per-source — there's one format call and one embed/match lookup for the whole tick, not one per source:
 
-- Query-side Titan embed call
-- `findNearestMatch` lookup
-- Store-side Titan embed + `insertEmbedding` call
+- The embed-plus-match step (`preVector = embedder.embed(preMessage)` then `findNearestMatch(db, preVector)`) is wrapped in one `try/catch` for the whole tick.
+- The per-source *store* step (`insertEmbedding`, inside the per-source write loop) has its own `try/catch`, isolated per source.
 
 The behavior, in plain English:
 
-> A failure at any of these steps:
-> - Is appended to `errors[]` and folds into `agent_runs.error`, exactly like an existing per-source failure.
-> - Does **not** abort the source's notification.
-> - Never blocks the Discord post.
+> A failure in the embed-or-match step:
+> - Is appended to `errors[]` and folds into `agent_runs.error`.
+> - Leaves `preVector` (and therefore `match`) as `null` for the rest of the tick.
+> - Never blocks the Discord post — the tick posts `preMessage` with no suffix.
+>
+> A failure in a per-source `insertEmbedding` call:
+> - Is appended to `errors[]` for that source specifically.
+> - Does not affect the `agent_notifications` row already committed for that source, or any other source's embedding insert.
 
-Read the second bullet again. If the *query-embed* or *match* step fails, `runFetch` proceeds with `match = null` — identical downstream behavior to "no history yet." The prompt has no similarity line, the columns are `NULL`, the status endpoint shows `nearestMatch: null`. If the *store-embed* step fails (after the notification already posted), the notification and its row still commit — only the corpus fails to grow by one entry for future lookups.
+If the embed-or-match step fails, every source in that tick gets `nearest_match_id = NULL` and no suffix — identical downstream behavior to "no history yet." If a store-side insert fails for one source (after the notification already posted and its row already committed), only that source's entry is missing from `agent_embeddings` — it won't be a candidate for a future match, but nothing about today's post is affected.
 
-That last case is the subtle one. The Discord post already happened. The notification already landed in `agent_notifications`. We couldn't embed it, so it won't appear as a match tomorrow. That's the entire failure mode: future lookups miss this one notification. The user-facing today experience is unaffected.
+This is the same isolation principle the base spec documents in [03-schema.md](03-schema.md), scoped to where RAG's actual boundaries are: once per tick for embed/match, once per source for the embedding insert. If you find yourself writing special-case error handling for RAG failures beyond these two `try/catch` blocks, you've broken the principle.
 
-This is the same isolation model the base spec documents in [03-schema.md](03-schema.md). The RAG extension is *one more category* of per-source failure, not a new failure-handling design. If you find yourself writing special-case error handling for embedding failures, you've broken the principle.
-
-**Check-in question:** walk me through what `agent_runs.error` would look like in a `fetch` run where the weather source's query-embed call timed out but the crypto source succeeded.
+**Check-in question:** walk me through what `agent_runs.error` would look like in a `fetch` tick where the Titan embed call timed out.
 
 <details>
 <summary>Expected reasoning</summary>
 
-It should look exactly like a `fetch` run where weather's source API timed out but crypto succeeded: one row in `agent_runs.error` for the weather source (whichever step failed first — query-embed, in this case), one normal success row for crypto. The Discord post for weather still happens (without a similarity line, because match is null). The Discord post for crypto still happens (with its similarity line, if any). The point is: per-source isolation means a Titan outage on one source's lookup is indistinguishable from a source-API outage, in terms of how `agent_runs` records it.
+One error entry — `rag: <timeout message>` — appended once for the whole tick, not once per source, because the embed-or-match step runs once per tick. `match` stays `null`. Every source's `agent_notifications` row for this tick gets `nearest_match_id = NULL`, `nearest_match_distance = NULL`, and no `insertEmbedding` calls happen at all (since there's no `preVector` to store) — that's a difference from a per-source store failure, which still tries to insert for sources whose own step didn't fail. The Discord post still happens, with no "Reminds me of" suffix. The point: a Titan outage degrades this tick to "no similarity mentioned," full stop, for every source at once.
 
 </details>
 
@@ -322,6 +324,8 @@ Read that carefully. It's a **self-join on the same table**, aliasing it as `mat
 Three things to internalize:
 
 **1. The reader does no vector work.** It is a `LEFT JOIN` on plain columns. It does not call `sqlite-vec`. It does not query `agent_embeddings`. The status endpoint is *showing what the writer already stored*, not recomputing anything. That's why `agent_notifications` carries `nearest_match_id` and `nearest_match_distance` as plain columns in the first place — to keep the reader's work O(rows) and SQL-pure.
+
+**1a. A subtlety worth naming: `nearestMatch.formattedMessage` is the matched tick's *posted* text, suffix included — not the `base_message` that tick actually used to build its own suffix.** The writer's suffix-building step (Lesson 6) always reads `base_message`, but the reader's join reads `formatted_message` for the matched row, because that's the human-readable text a status consumer wants to see (the same text that appeared in Discord). If you're comparing what the channel showed against what the JSON shows for a matched notification, expect them to differ by exactly one suffix.
 
 **2. `nearestMatch: null` covers two distinct cases.** "First observation for this source" and "the embedding step failed and was isolated" — the status endpoint doesn't distinguish them, and *neither has a match to show*. From the reader's point of view they're identical: no past notification exists for this notification to reference. The doc actively prevents you from adding "smart" handling that would make the reader's code more complex for no observable benefit.
 
@@ -387,13 +391,13 @@ This is exactly the asymmetry the design is built around. The chat model is swap
 The test suite mirrors existing conventions:
 
 - **`tests/titan.test.ts`** — mirrors `tests/bedrock.test.ts`: successful embed, throttle-then-retry-succeeds, retry-exhausted-throws, access-denied error mapping. Same `aws-sdk-client-mock` pattern.
-- **`tests/similarity.test.ts`** — in-memory `better-sqlite3` DB with the extension loaded: insert + KNN retrieval, same-source filtering (a crypto embedding never matches a weather query), `null` return when the source has no rows yet, the `k`-ceiling behavior documented as a passing case (not a bug) when exercised directly.
+- **`tests/similarity.test.ts`** — in-memory `better-sqlite3` DB with the extension loaded: insert + KNN retrieval, matching *across* sources (a crypto embedding can match a weather query — global KNN, no per-source filter, asserted explicitly since it's easy to assume otherwise), `null` return when there's no history yet, the `k`-ceiling behavior documented as a passing case (not a bug) when exercised directly.
 - **`tests/fetch.test.ts`** — extended with cases for: embed/match failure isolated into `agent_runs.error` without blocking the post; `nearest_match_id`/`nearest_match_distance` populated correctly when a match exists; both columns `NULL` on a source's first-ever notification.
 - **`tests/status.test.ts`** — extended for `nearestMatch` populated via the join, and `null` in both the no-match and match-omitted-due-to-failure cases.
 
 The interesting test design choice is in `tests/similarity.test.ts`: the `k`-ceiling behavior is asserted as a **passing case**, not a bug. Unusual in test suites — most tests assert what the code *should* do. This one asserts what the code *is documented to do*, including its limits. Deliberate teaching choice: it forces anyone reading the test to see the limit (and the doc comment it links to) instead of "fixing" it later by raising `k` without understanding the trade-off.
 
-The doc side: `docs/08-rag-vector-search.md` (note: file is `08-`, not `07-` as the original spec text suggested — `07-budget-protection.md` was added later and pushed it down) follows the existing numbered-doc convention. It covers: what `sqlite-vec` is, why one table not per-source, the raw-value-vs-formatted-message asymmetry (the chicken-and-egg reason), and the `k = 50` ceiling. `docs/01-architecture.md`'s diagram gains the Titan embedding calls alongside the existing Bedrock Converse call.
+The doc side: `docs/08-rag-vector-search.md` follows the existing numbered-doc convention. It covers: what `sqlite-vec` is, why one table across all sources with no per-source filter, why `base_message` is a separate column from `formatted_message` (the snowball reason from Lesson 6), and the `k = 50` ceiling. `docs/01-architecture.md`'s "Bedrock calls" section covers the two-call-per-tick shape (one Converse, one Titan) alongside the base rehydration pattern.
 
 ## Verify it works
 
@@ -414,14 +418,14 @@ If you see anything else — a failure, a timeout, a skipped test — stop and w
 Open any of these without referring back to the spec and explain it:
 
 1. The asymmetry. Writer does the vector work; reader reads plain columns.
-2. The choreography. Dedup first, then two Titan calls bracketing the format call, then insert. Three new failure points but the same per-source `try/catch`.
-3. The data model. One `vec0` table across all sources, 256 dims, two nullable columns, `ALTER TABLE`-in-`bootstrap()` for in-place upgrades.
+2. The choreography. No dedup — every tick posts. One format call, one embed call, per tick (not per source): the embed vector is computed once and reused for both search and store. Insert happens per source, sharing that tick's one match.
+3. The data model. One `vec0` table across all sources, 256 dims, three nullable columns (including `base_message`), `ALTER TABLE`-in-`bootstrap()` for in-place upgrades.
 4. The embed module. `InvokeModel` not `Converse`, fixed model id, retry policy mirrors the chat module.
-5. The similarity module. KNN of 50, app-level source filter, the raw-vs-formatted embedding asymmetry, the documented `k`-ceiling trade-off.
-6. `format()` extension. One prompt line, one `SYSTEM_PROMPT` sentence, no second Bedrock call, model *may* not *must* reference.
-7. Error isolation. RAG failures fold into the existing per-source model. Today's notification is unaffected; tomorrow's lookup may miss one entry.
-8. Status endpoint. Self-`LEFT JOIN` on plain columns. Reader does no vector work.
+5. The similarity module. KNN of 50 (≈2 hours at 5-min cadence), no source filter anywhere (global match by design), query and store both embed the same text (`preMessage`/`base_message`) — no raw-vs-formatted asymmetry anymore.
+6. The suffix. Built mechanically in `buildFinalMessageForDiscord`, after the Converse call, from `base_message` never `formatted_message` — the LLM never sees or influences it. This is also what prevents the suffix from snowballing.
+7. Error isolation. Embed-and-match is one tick-level failure point; the per-source embedding insert is its own. Today's post is unaffected either way; a failure just means tomorrow's lookup may miss an entry.
+8. Status endpoint. Self-`LEFT JOIN` on plain columns. Reader does no vector work. The matched text shown is `formatted_message` (posted text, suffix included), not `base_message`.
 9. Infra. One new resource ARN, no new IAM action, not routed through `buildBedrockResources` because the embedding model isn't swappable.
-10. Tests + docs. The `k`-ceiling is asserted as a passing case, deliberately.
+10. Tests + docs. The `k`-ceiling is asserted as a passing case, deliberately; cross-source matching is asserted explicitly rather than assumed away.
 
 If any of those feels thin to the student when they try to reproduce the reasoning, drill back into the corresponding lesson before declaring the session done.

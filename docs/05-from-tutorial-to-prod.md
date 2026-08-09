@@ -14,7 +14,7 @@ not be a side effect of a stack deletion.
 ## More than one writer path
 
 This tutorial has exactly one thing that writes to the snapshot: the `fetch` op, on a
-fixed daily schedule. A production agent is more likely to need multiple write paths — a
+fixed schedule. A production agent is more likely to need multiple write paths — a
 scheduled job and a manually-triggered one, say — which raises the question of whether
 `reservedConcurrentExecutions: 1` is still sufficient once two *different* Lambda
 functions might both want to write. It isn't, on its own: reserved concurrency only
@@ -33,8 +33,9 @@ topology changes.
 
 ## Model selection
 
-This tutorial defaults to `zai.glm-4.7-flash` for cost — the whole daily notification
-costs under $0.02/year at that price point (see `docs/bedrock-model-comparison.md`). A
+This tutorial defaults to `zai.glm-4.7-flash` for cost — at the default 5-minute loop
+cadence it runs roughly $0.02–$0.04/day at that price point (see
+`docs/bedrock-model-comparison.md` and the README's Cost section). A
 production system with actual latency or quality requirements should probe candidates against your real
 prompt, not against a price list, and pin the choice with the same "why not something
 else" reasoning that doc records.
@@ -43,6 +44,6 @@ else" reasoning that doc records.
 
 The rehydration protocol — bootstrap, conditional writes, version-cached reads — doesn't
 change shape as the system grows. That's the point of the pattern: it's the same mechanism
-whether the payload is a two-table dedup cache or a larger state file with more tables and
-indices. What changes is how much work happens between hydrate and publish, not how
-hydrate and publish themselves work.
+whether the payload is this tutorial's small notification/embedding log or a larger state
+file with more tables and indices. What changes is how much work happens between hydrate
+and publish, not how hydrate and publish themselves work.

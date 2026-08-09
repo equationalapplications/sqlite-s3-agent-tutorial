@@ -15,11 +15,11 @@ export interface NotificationStatus {
   value: string;
   formattedMessage: string;
   postedAt: number;
-  /** The closest same-source past notification at the time this one was posted (RAG
-   *  design spec §7), or `null` if this was the source's first-ever notification, or the
-   *  RAG lookup failed and was isolated (spec §6) — the two cases are indistinguishable
-   *  here on purpose, since neither has a match to show. Populated once, at write time,
-   *  by `runFetch`; this module never runs a vector query itself. */
+  /** The closest past tick's notification (global match, no per-source filter — see
+   *  src/rag/similarity.ts) at the time this one was posted, or `null` if this was the
+   *  first tick ever, or the RAG lookup failed and was isolated — the two cases are
+   *  indistinguishable here on purpose, since neither has a match to show. Populated
+   *  once, at write time, by `runFetch`; this module never runs a vector query itself. */
   nearestMatch: {
     source: string;
     formattedMessage: string;
@@ -80,7 +80,7 @@ function queryStatus(db: Database.Database, etag: string): StatusResult {
   // endpoint can be invoked against such a snapshot before the next fetch run has
   // had a chance to migrate it — in which case the joined query below would throw
   // `no such column: n.nearest_match_distance`. Feature-detect via `PRAGMA
-  // table_info`, mirroring `addNearestMatchColumnsIfMissing` in `src/db/bootstrap.ts`,
+  // table_info`, mirroring `addMissingColumns` in `src/db/bootstrap.ts`,
   // and fall back to the pre-RAG query so the endpoint stays a plain diagnostic.
   const columnNames = new Set(
     (db.prepare(`PRAGMA table_info(agent_notifications)`).all() as Array<{ name: string }>).map((c) => c.name),

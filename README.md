@@ -1,19 +1,22 @@
 # sqlite-s3-agent-tutorial
 
 A working example of the **SQLite-as-a-database-for-an-agent-on-AWS, rehydrated-by-S3**
-pattern: a Discord bot that checks the weather and Bitcoin price once a day, asks an LLM
-(Amazon Bedrock) to turn the raw value into a friendly message, posts it to a Discord
-webhook, and remembers what it already posted — all state lives in a single SQLite file
-in S3. No database server, no VPC. The same file also doubles as a vector database: each
-posted message gets embedded (Titan Text Embeddings V2) and searched with `sqlite-vec`,
-so the bot can mention the closest past result — see
-[docs/08-rag-vector-search.md](docs/08-rag-vector-search.md).
+pattern: a Discord bot that checks the weather and Bitcoin price on a schedule, asks an LLM
+(Amazon Bedrock) to turn the day's readings into a friendly message plus a closing haiku,
+and posts it to a Discord webhook — all state lives in a single SQLite file in S3. No
+database server, no VPC. The same file also doubles as a vector database: each tick's
+message gets embedded (Titan Text Embeddings V2) and searched with `sqlite-vec`, so the
+bot can mention the closest past result — see
+[docs/08-rag-vector-search.md](docs/08-rag-vector-search.md). There is no dedup — every
+tick posts, deliberately, to keep the tutorial's control flow simple; see
+[docs/03-schema.md](docs/03-schema.md).
 
 ## Quick start
 
 ```bash
 npm install
 npm test
+npm run typecheck
 
 # Put your webhook URL in an untracked .env (see docs/06-discord-webhook-setup.md),
 # then source it and run the writer — keeping the URL out of shell history.
@@ -30,6 +33,9 @@ real thing:
 export AWS_PROFILE=your-profile
 # Source the webhook URL from an untracked file rather than echoing it inline —
 # `infra/stack.ts` reads DISCORD_WEBHOOK_URL at synth time and throws if it is unset.
+# `.env.discord` is a separate file from the local-run `.env` above so a deploy never
+# accidentally picks up other local-only vars (e.g. a test `DB_PATH` override) from
+# the file meant for `npm run local-fetch`.
 set -a; . ./.env.discord; set +a   # .env.discord is gitignored
 npm run deploy
 npm run smoke
@@ -63,7 +69,7 @@ haiku. If a past message in the corpus is close enough, the LLM's pre-suffix out
 is mechanically appended with a `Reminds me of: <past message>` line. All three
 scripts read the rule name from the `LoopRuleName` stack output and call the
 EventBridge API directly using the same AWS CLI credentials the smoke script
-already requires. `loop-status` is read-only — print the rule's current
+already requires. `loop-status` is read-only — it prints the rule's current
 `ENABLED`/`DISABLED` state plus its schedule expression and ARN.
 
 **Stop the loop when you're done** — `loop-stop.sh` disables the EventBridge rule so
@@ -79,20 +85,29 @@ To verify the reader side of the loop (no Discord post, no Bedrock call), run
 
 ## Triggering a fetch on demand
 
-The daily `fetch` run is normally EventBridge's job, but you can also trigger one over
+The scheduled `fetch` run is normally EventBridge's job, but you can also trigger one over
 HTTP via the same Function URL the `status` op uses. The Function URL is locked to
 AWS_IAM — your CLI credentials must be authorized against the same-account URL grant
 the stack synthesizes (smoke-status-iam design §3.1) before the request reaches the
-handler. This is off by default — set `FETCH_TRIGGER_TOKEN` before deploying (`export
-FETCH_TRIGGER_TOKEN=...` before `npm run deploy`, alongside `DISCORD_WEBHOOK_URL`), then:
+handler, so the request must be SigV4-signed the same way `scripts/smoke.sh` signs its
+status probe (a plain `curl` without `--aws-sigv4` gets `403` from the URL itself). This
+is off by default — set `FETCH_TRIGGER_TOKEN` before deploying (`export
+FETCH_TRIGGER_TOKEN=...` before `npm run deploy`, alongside `DISCORD_WEBHOOK_URL`), then
+the token goes on the query string (`?token=...`) and `op` goes in the JSON body —
+`resolveOp` in `src/handler.ts` only reads `op` from the top-level payload or the JSON
+`body`, and the token check reads `queryStringParameters.token`, so putting the token in
+the body or `op` on the query string will not work:
 
 ```bash
-curl -X POST "$FUNCTION_URL?token=$FETCH_TRIGGER_TOKEN" --data '{"op":"fetch"}'
+curl -X POST "$FUNCTION_URL?token=$FETCH_TRIGGER_TOKEN" \
+  --aws-sigv4 "aws:amz:$AWS_REGION:lambda" \
+  --user "$(aws configure get aws_access_key_id):$(aws configure get aws_secret_access_key)" \
+  --data '{"op":"fetch"}'
 ```
 
 Without a matching token, an HTTP-triggered `fetch` request is rejected with 403; the
-scheduled EventBridge fetch is unaffected either way. Since anyone with a valid token can
-run this repeatedly (a real Bedrock call and Discord post each time), see
+scheduled EventBridge fetch is unaffected either way. Since anyone with a valid token *and*
+IAM access can run this repeatedly (a real Bedrock call and Discord post each time), see
 [docs/07-budget-protection.md](docs/07-budget-protection.md) before relying on this in a
 deploy you leave running unattended.
 
@@ -120,7 +135,7 @@ If you want to keep using SQLite without managing a traditional database server,
 
 #### 2. Litestream / Litefs: The Replication Stream
 [Litestream](https://litestream.io) runs a background sidecar process alongside SQLite that continuously streams WAL (Write-Ahead Log) frames to an S3 bucket every second.
-* **How it works:** Instead of pulling/pushing a giant database file, it repligates granular changes.
+* **How it works:** Instead of pulling/pushing a giant database file, it replicates granular changes.
 * **The Benefit:** Drastically reduces S3 network I/O, protects against data loss down to the second, and scales read concurrency beautifully.
 * **Trade-off:** Best suited for long-running containers (ECS Fargate) rather than short-lived, ephemeral Lambda functions.
 
@@ -135,17 +150,20 @@ When cross-agent transactional consistency becomes a core app requirement, migra
 |---|---|
 | [docs/01-architecture.md](docs/01-architecture.md) | The pattern, in prose: one Lambda, two ops, one bucket |
 | [docs/02-rehydration.md](docs/02-rehydration.md) | Bootstrap, conditional writes, version-cached reads |
-| [docs/03-schema.md](docs/03-schema.md) | Why three tables, not one |
+| [docs/03-schema.md](docs/03-schema.md) | The tables, and why there's no dedup |
 | [docs/04-extending.md](docs/04-extending.md) | Adding a third source |
 | [docs/05-from-tutorial-to-prod.md](docs/05-from-tutorial-to-prod.md) | What changes if you outgrow this |
+| [docs/06-discord-webhook-setup.md](docs/06-discord-webhook-setup.md) | Creating and configuring the Discord webhook |
 | [docs/07-budget-protection.md](docs/07-budget-protection.md) | Setting up an AWS Budget alert, and what could actually drive cost up |
 | [docs/08-rag-vector-search.md](docs/08-rag-vector-search.md) | SQLite as a vector database too: sqlite-vec + Titan embeddings |
 | [docs/09-lesson-script.md](docs/09-lesson-script.md) | A 10-lesson script for teaching the RAG extension (frame, check-in questions, expected reasoning) |
+| [docs/bedrock-model-comparison.md](docs/bedrock-model-comparison.md) | Why `zai.glm-4.7-flash` is the default, and alternatives |
 
 ## Cost
 
-At one Discord post per day, `zai.glm-4.7-flash` costs under $0.02/year. See
-[docs/bedrock-model-comparison.md](docs/bedrock-model-comparison.md) for alternatives.
-For a spending backstop against misconfiguration (e.g. a leaked on-demand fetch trigger
-token — see the on-demand trigger below), see
-[docs/07-budget-protection.md](docs/07-budget-protection.md).
+At the default 5-minute loop cadence (288 ticks/day, 1 Converse + 1 Titan call per tick),
+`zai.glm-4.7-flash` runs roughly $0.02–$0.04/day — see
+[docs/07-budget-protection.md](docs/07-budget-protection.md) for the full breakdown and
+what else can drive cost up (e.g. a leaked on-demand fetch trigger token — see the
+on-demand trigger below). See [docs/bedrock-model-comparison.md](docs/bedrock-model-comparison.md)
+for alternative models and their pricing.
