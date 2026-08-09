@@ -109,7 +109,7 @@ export interface MessageFormatter {
 }
 ```
 
-The signature change is internal — `MessageFormatter` is not exported from the package, only consumed by `runFetch` and `localFetch`. `LocalTemplateFormatter` and `BedrockFormatter` are updated to match.
+The signature change is internal — `MessageFormatter` is a TypeScript type used only by `runFetch` and `localFetch` (and the format module's own tests); it is not a public package surface. `LocalTemplateFormatter` and `BedrockFormatter` are updated to match.
 
 ### 4.3 `src/format/bedrock.ts` — new system prompt
 
@@ -172,7 +172,7 @@ Two new scripts matching the style of `scripts/smoke.sh`: tempfiles for sensitiv
 
 Loop-specific failures follow the same isolation rules as the base spec:
 
-- A `loop-start` / `loop-stop` op that fails the conditional write is reported in the `agent_runs.error` field (the run row is written before the publish, so a publish failure is recorded in-process; the next tick retries the full sequence).
+- A `loop-start` / `loop-stop` op that fails the conditional write loses the setting change: the local DB has the new value, but the next invocation hydrates from S3 (which still has the old snapshot) and the change is not visible. The same posture as the existing `runFetch` publish-failure path (base spec §4.2). The user must re-run the curl; the failed attempt is logged in-process but not visible to a fresh reader.
 - A `runFetch` invocation that runs while `loop_enabled='false'` is a no-op. It does not write an `agent_runs` row (so the table is not filled with empty rows at 3-min cadence), and it does not republish the snapshot (so the S3 object is not touched).
 - A formatter error per source is caught by the existing per-source `try`/`catch` and folded into `agent_runs.error`. The other source still posts.
 - A Discord 4xx is not retried (existing behavior); a 5xx gets one ~250ms retry (existing). Same rules apply.
@@ -185,7 +185,7 @@ Unit tests (vitest) for:
 
 - `runFetch` with `loop_enabled='false'`: short-circuits, no fetch, no post, no publish, no run row.
 - `runFetch` with `FETCH_DEDUP=false`: two unchanged-value ticks both post.
-- `runFetch` with `FETCH_DEDUP=true`: an unchanged-value tick is deduped (existing behavior, regression test).
+- `runFetch` with `FETCH_DEDUP=true`: an unchanged-value tick is deduped (regression test for the existing dedup path, which is now opt-in).
 - `loop-start` / `loop-stop` ops: write to `agent_settings`, publish the snapshot, return the new `loopEnabled` value.
 - `loop-start` / `loop-stop` without `LOOP_TOKEN`: 403, no DB write, no publish.
 - Status endpoint: `loopEnabled` reflects the current setting (true / false / missing → default true).
