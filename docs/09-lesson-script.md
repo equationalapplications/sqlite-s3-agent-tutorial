@@ -8,7 +8,7 @@
 
 Each lesson opens with the *frame* (what concept you're trying to land) and closes with a *check-in question* — the kind you'd ask out loud, not as a written quiz. The expected reasoning for each question is given in a collapsed detail block so the teacher can read it before class but the student can't see it during the lesson.
 
-End the session by running `npm test` from the repo root with the student watching. The expected output — **110 tests across 14 files pass in ~6.5 seconds** — is the proof that the lesson landed.
+End the session by running `npm test` from the repo root with the student watching. The expected output — **the whole suite passes** (the count of test files and the timing will drift as the suite grows; check the live output against today's count) — is the proof that the lesson landed.
 
 ---
 
@@ -145,7 +145,7 @@ Two design choices deserve attention:
 
 **1. `InvokeModel`, not `Converse`.** Bedrock's chat-shaped models (Claude, GLM, etc.) use `Converse` — a structured chat API. Titan's embedding API uses `InvokeModel` — a plain request/response body. The chat-side abstraction (`src/format/families.ts`) exists because the *chat* model is swappable across providers; the embedding model is not. One model, one code path, no family-resolution branching. If you find yourself adding a model-resolution switch to `titan.ts`, you've made the wrong design decision.
 
-**2. The embedding model id is not configurable.** Fixed at `amazon.titan-embed-text-v2:0`. Configurability would mean re-embedding the entire corpus on every model change — a migration problem this tutorial doesn't need to teach. The doc calls this out by name in Section 11.
+**2. The embedding model id is not configurable.** Fixed at `amazon.titan-embed-text-v2:0`. Configurability would mean re-embedding the entire corpus on every model change — a migration problem this tutorial doesn't need to teach. The RAG doc calls this out by name in its "Out of scope" section.
 
 `src/embed/local.ts` exists alongside it — a no-op embedder that returns a deterministic placeholder vector. It exists for the same reason `LocalTemplateFormatter` exists in `src/format/local.ts`: so the Phase 1 (no-AWS) path type-checks against the same `Embedder` interface.
 
@@ -376,7 +376,7 @@ Both, because this design treats the embedding model as **fixed** and the chat m
 1. **IAM:** replace the Titan ARN with the Cohere embedding model ARN. (If Cohere embeddings also use `bedrock:InvokeModel`, no new IAM action; if they use a different action, add that action.)
 2. **Embed module:** rewrite `createTitanEmbedder` (or add a sibling factory) to call Cohere's API instead of Titan's — different request body shape, different response shape, possibly different SDK. The `Embedder` interface stays the same so `findNearestMatch` and `fetch.ts` don't change.
 
-This is exactly the asymmetry the design is built around. The chat model is swappable across providers, so the chat-side abstraction (`families.ts`, `buildBedrockResources`) absorbs that complexity. The embedding model is fixed, so the embedding side has no analogous abstraction — and the doc calls this out by name as out-of-scope (Section 11).
+This is exactly the asymmetry the design is built around. The chat model is swappable across providers, so the chat-side abstraction (`families.ts`, `buildBedrockResources`) absorbs that complexity. The embedding model is fixed, so the embedding side has no analogous abstraction — and the RAG doc calls this out by name in its "Out of scope" section.
 
 </details>
 
@@ -403,13 +403,7 @@ End the lesson by running, from the repo root, with the student watching:
 npm test
 ```
 
-Expected output:
-
-```
- Test Files  14 passed (14)
-      Tests  110 passed (110)
-   Duration  ~6.5s
-```
+Expected output: a clean pass — every test file green, every test green, no skipped or timed-out tests. The exact file/test counts and the duration will drift as the suite grows; treat those numbers as approximate and read the live output for today's truth.
 
 If you see anything else — a failure, a timeout, a skipped test — stop and walk through which lesson it relates to before continuing. The test suite is the lesson's proof of correctness; the lesson's reasoning is the test suite's proof of intent. Both have to hold.
 
