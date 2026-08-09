@@ -1,5 +1,6 @@
 import { loadConfig } from './config.js';
 import { runFetch } from './agent/fetch.js';
+import { createLocalEmbedder } from './embed/local.js';
 import { createLocalTemplateFormatter } from './format/local.js';
 import { createFetchDiscordPoster } from './discord/poster.js';
 import { createSourceFetcher } from './sources/index.js';
@@ -16,6 +17,7 @@ async function main(): Promise<void> {
     sources: config.sources.map((name) => createSourceFetcher(name, config.weatherLocation)),
     poster: createFetchDiscordPoster(config.discordWebhookUrl),
     formatter: createLocalTemplateFormatter(),
+    embedder: createLocalEmbedder(),
   });
 
   console.log(JSON.stringify(result, null, 2));
