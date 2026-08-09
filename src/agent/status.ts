@@ -15,6 +15,17 @@ export interface NotificationStatus {
   value: string;
   formattedMessage: string;
   postedAt: number;
+  /** The closest same-source past notification at the time this one was posted (RAG
+   *  design spec §7), or `null` if this was the source's first-ever notification, or the
+   *  RAG lookup failed and was isolated (spec §6) — the two cases are indistinguishable
+   *  here on purpose, since neither has a match to show. Populated once, at write time,
+   *  by `runFetch`; this module never runs a vector query itself. */
+  nearestMatch: {
+    source: string;
+    formattedMessage: string;
+    postedAt: number;
+    distance: number;
+  } | null;
 }
 
 export interface StatusResult {
@@ -50,17 +61,28 @@ function queryStatus(db: Database.Database, etag: string): StatusResult {
     .all() as Array<{ name: string; last_value: string | null; last_fetched_at: number | null; last_posted_at: number | null }>;
 
   // id DESC is a tie-breaker for notifications that share the same posted_at — without
-  // it, the LIMIT picks an arbitrary subset and the endpoint output is not stable.
+  // it, the LIMIT picks an arbitrary subset and the endpoint output is not stable. The
+  // LEFT JOIN pulls the matched notification's own source/message/postedAt so the status
+  // endpoint is self-contained — no vector search happens here, only a second read of
+  // already-open agent_notifications (RAG design spec §7).
   const notifications = db
     .prepare(
-      `SELECT source, value, formatted_message, posted_at FROM agent_notifications
-       ORDER BY posted_at DESC, id DESC LIMIT ?`,
+      `SELECT n.source, n.value, n.formatted_message, n.posted_at, n.nearest_match_distance,
+              m.source AS matched_source, m.formatted_message AS matched_formatted_message,
+              m.posted_at AS matched_posted_at
+       FROM agent_notifications n
+       LEFT JOIN agent_notifications m ON m.id = n.nearest_match_id
+       ORDER BY n.posted_at DESC, n.id DESC LIMIT ?`,
     )
     .all(RECENT_NOTIFICATIONS_LIMIT) as Array<{
     source: string;
     value: string;
     formatted_message: string;
     posted_at: number;
+    nearest_match_distance: number | null;
+    matched_source: string | null;
+    matched_formatted_message: string | null;
+    matched_posted_at: number | null;
   }>;
 
   return {
@@ -76,6 +98,15 @@ function queryStatus(db: Database.Database, etag: string): StatusResult {
       value: row.value,
       formattedMessage: row.formatted_message,
       postedAt: row.posted_at,
+      nearestMatch:
+        row.matched_source === null
+          ? null
+          : {
+              source: row.matched_source,
+              formattedMessage: row.matched_formatted_message as string,
+              postedAt: row.matched_posted_at as number,
+              distance: row.nearest_match_distance as number,
+            },
     })),
   };
 }

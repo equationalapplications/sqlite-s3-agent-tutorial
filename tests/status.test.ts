@@ -65,7 +65,7 @@ describe('createStatusReader', () => {
       { name: 'weather', lastValue: '72F', lastFetchedAt: 1000, lastPostedAt: 1000 },
     ]);
     expect(result.recentNotifications).toEqual([
-      { source: 'weather', value: '72F', formattedMessage: 'Looks like 72F today!', postedAt: 1000 },
+      { source: 'weather', value: '72F', formattedMessage: 'Looks like 72F today!', postedAt: 1000, nearestMatch: null },
     ]);
   });
 
@@ -226,5 +226,41 @@ describe('createStatusReader', () => {
     expect(recovered.sources).toEqual([
       { name: 'weather', lastValue: '72F', lastFetchedAt: 1000, lastPostedAt: 1000 },
     ]);
+  });
+
+  it('includes nearestMatch when a notification has a recorded nearest_match_id', async () => {
+    const db = openDatabase(ctx.dbPath);
+    bootstrap(db);
+    db.prepare(
+      `INSERT INTO agent_sources (name, last_value, last_fetched_at, last_posted_at)
+       VALUES ('weather', '72F', 1000, 1000)`,
+    ).run();
+    const firstId = db
+      .prepare(
+        `INSERT INTO agent_notifications (source, value, formatted_message, posted_at)
+         VALUES ('weather', '72F', 'Looks like 72F today!', 1000)`,
+      )
+      .run().lastInsertRowid as number;
+    db.prepare(
+      `INSERT INTO agent_notifications
+         (source, value, formatted_message, posted_at, nearest_match_id, nearest_match_distance)
+       VALUES ('weather', '75F', 'A bit warmer today!', 2000, ?, 0.05)`,
+    ).run(firstId);
+    db.close();
+    await ctx.store.put('memory.db', readFileSync(ctx.dbPath), null);
+
+    const reader = createStatusReader(join(ctx.dir, 'reader-copy.db'));
+    const result = await reader.getStatus(ctx.store, 'memory.db');
+
+    const secondNotification = result.recentNotifications.find((n) => n.value === '75F');
+    expect(secondNotification?.nearestMatch).toEqual({
+      source: 'weather',
+      formattedMessage: 'Looks like 72F today!',
+      postedAt: 1000,
+      distance: 0.05,
+    });
+
+    const firstNotification = result.recentNotifications.find((n) => n.value === '72F');
+    expect(firstNotification?.nearestMatch).toBeNull();
   });
 });
