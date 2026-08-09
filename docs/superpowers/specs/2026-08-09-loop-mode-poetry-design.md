@@ -71,9 +71,9 @@ curl "FUNCTION_URL?token=$LOOP_TOKEN" --data '{"op":"loop-stop"}'
 ### 4.1 `src/config.ts` — new env vars
 
 - `LOOP_TOKEN` (string, optional, default `null`): gates the new `loop-start` / `loop-stop` ops. Same default-deny posture as `FETCH_TRIGGER_TOKEN` (rejects with 403 when unset).
-- `LOOP_RULE_NAME` (string, required if `LOOP_TOKEN` is set, default `null`): the EventBridge rule to enable/disable. Set by the CDK stack at synth time.
+- `LOOP_RULE_NAME` (string, optional, default `null`): the EventBridge rule to enable/disable. If `LOOP_TOKEN` is set but `LOOP_RULE_NAME` is empty, `loadConfig` throws at startup — the two env vars travel together (the CDK stack sets both or neither). Set by the CDK stack at synth time.
 
-No new parser — both reuse the existing `str` / `optionalStr` helpers.
+No new parser — both reuse the existing `str` / `optionalStr` helpers, with `loadConfig` adding a single cross-field check.
 
 ### 4.2 `src/format/types.ts` — new `FormatContext`
 
