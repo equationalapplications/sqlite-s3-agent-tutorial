@@ -11,7 +11,10 @@ export function createWeatherFetcher(location = 'NYC'): SourceFetcher {
         throw new Error(`wttr.in responded ${response.status}`);
       }
       const text = await response.text();
-      return text.trim();
+      // Location folded into the value itself (not a separate field): it's static per
+      // deploy, so it never causes a spurious dedup re-post, and the formatter needs no
+      // extra plumbing to see it — it's already reading the full rawValue.
+      return `${location}: ${text.trim()}`;
     },
   };
 }

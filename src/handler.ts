@@ -1,4 +1,5 @@
 // src/handler.ts
+import { timingSafeEqual } from 'node:crypto';
 import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { S3Client } from '@aws-sdk/client-s3';
 import { runFetch } from './agent/fetch.js';
@@ -18,6 +19,13 @@ import { createS3Store } from './store/s3.js';
 export interface HandlerEvent {
   op?: string;
   body?: string;
+  queryStringParameters?: Record<string, string | undefined> | null;
+  /**
+   * Present only on Function URL invocations, absent on EventBridge's `{op:"fetch"}`
+   * literal payload — used purely as a discriminator (`resolveIsHttpTriggered`) to decide
+   * whether the fetch-trigger token check applies. Its actual contents are never read.
+   */
+  requestContext?: unknown;
 }
 
 export interface LambdaResult {
@@ -83,6 +91,30 @@ function resolveOp(event: HandlerEvent): string | undefined {
 }
 
 /**
+ * EventBridge's schedule delivers the literal `{op:"fetch"}` payload (spec §2) — no
+ * `requestContext`, because it isn't an HTTP request. Function URL invocations always
+ * carry one. Used to scope the fetch-trigger token check (below) to HTTP-originated
+ * requests only, so the scheduled fetch never needs to know the token exists.
+ */
+function resolveIsHttpTriggered(event: HandlerEvent): boolean {
+  return event.requestContext !== undefined;
+}
+
+/**
+ * Constant-time comparison so a mismatched token doesn't leak length/prefix information
+ * through response timing. Different-length inputs return `false` immediately — that
+ * leaks only the fact that lengths differ, not which bytes matched, which is the
+ * standard accepted trade-off for this kind of check (Node's `timingSafeEqual` throws on
+ * length mismatch rather than handling it).
+ */
+function tokensMatch(provided: string, expected: string): boolean {
+  const providedBuf = Buffer.from(provided);
+  const expectedBuf = Buffer.from(expected);
+  if (providedBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(providedBuf, expectedBuf);
+}
+
+/**
  * Lambda entry orchestration, separated from the `handler` export below so tests can
  * inject clients and fake source fetchers without touching `process.env` or the network.
  *
@@ -111,6 +143,18 @@ export async function runHandler(
     return { statusCode: 200, body: JSON.stringify(result) };
   }
 
+  // Fetch posts to Discord and calls Bedrock on every invocation — EventBridge's schedule
+  // is trusted by construction (its payload is a literal constant this stack itself
+  // configures), but an HTTP-triggered fetch is reachable by anyone with the Function URL,
+  // so it requires a matching FETCH_TRIGGER_TOKEN. Unset token (the default) rejects all
+  // HTTP-triggered fetches rather than defaulting to open (spec: on-demand trigger design).
+  if (op === 'fetch' && resolveIsHttpTriggered(event)) {
+    const provided = event.queryStringParameters?.token;
+    if (config.fetchTriggerToken === null || provided === undefined || !tokensMatch(provided, config.fetchTriggerToken)) {
+      return { statusCode: 403, body: JSON.stringify({ error: 'Invalid or missing fetch trigger token' }) };
+    }
+  }
+
   const s3Client = clients.s3Client ?? new S3Client({ region: config.region, maxAttempts: 3 });
   const bedrockClient =
     clients.bedrockClient ?? new BedrockRuntimeClient({ region: config.bedrockRegion, maxAttempts: 3 });
@@ -128,7 +172,7 @@ export async function runHandler(
     if (override !== undefined) {
       return { name, fetch: override };
     }
-    return createSourceFetcher(name);
+    return createSourceFetcher(name, config.weatherLocation);
   });
 
   const result = await runFetch({

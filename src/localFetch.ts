@@ -13,7 +13,7 @@ async function main(): Promise<void> {
     dbPath: config.dbPath,
     store,
     storeKey: 'memory.db',
-    sources: config.sources.map((name) => createSourceFetcher(name)),
+    sources: config.sources.map((name) => createSourceFetcher(name, config.weatherLocation)),
     poster: createFetchDiscordPoster(config.discordWebhookUrl),
     formatter: createLocalTemplateFormatter(),
   });

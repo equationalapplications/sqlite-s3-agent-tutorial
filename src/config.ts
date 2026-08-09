@@ -10,6 +10,7 @@ export interface AgentConfig {
   readonly dbPath: string;
   readonly discordWebhookUrl: string;
   readonly sources: readonly SourceName[];
+  readonly weatherLocation: string;
 
   readonly region: string;
   readonly snapshotBucket: string;
@@ -20,6 +21,8 @@ export interface AgentConfig {
   readonly bedrockMaxOutputTokens: number;
 
   readonly reservedConcurrency: number;
+
+  readonly fetchTriggerToken: string | null;
 }
 
 type Env = Record<string, string | undefined>;
@@ -35,6 +38,14 @@ function required(env: Env, key: string): string {
 function str(env: Env, key: string, fallback: string): string {
   const value = env[key];
   return value === undefined || value.trim() === '' ? fallback : value;
+}
+
+/** Like `str`, but with no fallback: `null` means the feature the key gates is disabled
+ *  rather than defaulted. Used for `FETCH_TRIGGER_TOKEN`, where a default value would
+ *  mean shipping a publicly-guessable secret. */
+function optionalStr(env: Env, key: string): string | null {
+  const value = env[key];
+  return value === undefined || value.trim() === '' ? null : value;
 }
 
 /**
@@ -114,6 +125,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     dbPath: str(env, 'DB_PATH', '/tmp/memory.db'),
     discordWebhookUrl: required(env, 'DISCORD_WEBHOOK_URL'),
     sources: sources(env),
+    weatherLocation: str(env, 'WEATHER_LOCATION', 'NYC'),
 
     region,
     snapshotBucket: required(env, 'SNAPSHOT_BUCKET'),
@@ -124,5 +136,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
     bedrockMaxOutputTokens: posInt(env, 'BEDROCK_MAX_OUTPUT_TOKENS', 512),
 
     reservedConcurrency: num(env, 'RESERVED_CONCURRENCY', 1),
+
+    fetchTriggerToken: optionalStr(env, 'FETCH_TRIGGER_TOKEN'),
   });
 }

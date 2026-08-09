@@ -153,4 +153,78 @@ describe('runHandler', () => {
     const result = await runHandler({ body: 'not json' }, env);
     expect(result.statusCode).toBe(400);
   });
+
+  describe('fetch-trigger token gating', () => {
+    const baseEnv = {
+      DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
+      SNAPSHOT_BUCKET: 'test-bucket',
+      SOURCES: '["weather"]',
+    };
+
+    it('rejects an HTTP-triggered fetch with 403 when FETCH_TRIGGER_TOKEN is unset', async () => {
+      const env = { ...baseEnv, DB_PATH: join(dir, 'memory.db') };
+      const result = await runHandler(
+        { op: 'fetch', requestContext: {}, queryStringParameters: { token: 'anything' } },
+        env,
+        {},
+        { weather: async () => '72F' },
+      );
+      expect(result.statusCode).toBe(403);
+    });
+
+    it('rejects an HTTP-triggered fetch with 403 when the token does not match', async () => {
+      const env = { ...baseEnv, DB_PATH: join(dir, 'memory.db'), FETCH_TRIGGER_TOKEN: 'correct-token' };
+      const result = await runHandler(
+        { op: 'fetch', requestContext: {}, queryStringParameters: { token: 'wrong-token' } },
+        env,
+        {},
+        { weather: async () => '72F' },
+      );
+      expect(result.statusCode).toBe(403);
+    });
+
+    it('rejects an HTTP-triggered fetch with 403 when no token is supplied', async () => {
+      const env = { ...baseEnv, DB_PATH: join(dir, 'memory.db'), FETCH_TRIGGER_TOKEN: 'correct-token' };
+      const result = await runHandler({ op: 'fetch', requestContext: {} }, env, {}, { weather: async () => '72F' });
+      expect(result.statusCode).toBe(403);
+    });
+
+    it('runs an HTTP-triggered fetch when the token matches', async () => {
+      s3.on(GetObjectCommand).rejects({ name: 'NoSuchKey' }); // bootstrap
+      s3.on(PutObjectCommand).resolves({ ETag: '"v1"' });
+      bedrock.on(ConverseCommand).resolves({
+        output: { message: { role: 'assistant', content: [{ text: 'Weather update: 72F' }] } },
+        stopReason: 'end_turn',
+      });
+
+      const env = { ...baseEnv, DB_PATH: join(dir, 'memory.db'), FETCH_TRIGGER_TOKEN: 'correct-token' };
+      const result = await runHandler(
+        { op: 'fetch', requestContext: {}, queryStringParameters: { token: 'correct-token' } },
+        env,
+        { s3Client: s3 as unknown as S3Client, bedrockClient: bedrock as unknown as BedrockRuntimeClient },
+        { weather: async () => '72F' },
+      );
+      expect(result.statusCode).toBe(200);
+      const body = JSON.parse(result.body ?? '{}');
+      expect(body.outcome).toBe('success');
+    });
+
+    it('runs an EventBridge-triggered fetch regardless of FETCH_TRIGGER_TOKEN (no requestContext, trusted by construction)', async () => {
+      s3.on(GetObjectCommand).rejects({ name: 'NoSuchKey' }); // bootstrap
+      s3.on(PutObjectCommand).resolves({ ETag: '"v1"' });
+      bedrock.on(ConverseCommand).resolves({
+        output: { message: { role: 'assistant', content: [{ text: 'Weather update: 72F' }] } },
+        stopReason: 'end_turn',
+      });
+
+      const env = { ...baseEnv, DB_PATH: join(dir, 'memory.db') }; // token unset
+      const result = await runHandler(
+        { op: 'fetch' }, // EventBridge's literal payload — no requestContext
+        env,
+        { s3Client: s3 as unknown as S3Client, bedrockClient: bedrock as unknown as BedrockRuntimeClient },
+        { weather: async () => '72F' },
+      );
+      expect(result.statusCode).toBe(200);
+    });
+  });
 });

@@ -13,6 +13,8 @@ const IMAGE_DIR = '.';
 
 interface AgentStackProps extends cdk.StackProps {
   bedrockModelId?: string;
+  weatherLocation?: string;
+  fetchTriggerToken?: string;
 }
 
 /**
@@ -25,6 +27,7 @@ class AgentStack extends cdk.Stack {
     super(scope, id, props);
 
     const bedrockModelId = props.bedrockModelId ?? 'zai.glm-4.7-flash';
+    const weatherLocation = props.weatherLocation ?? 'NYC';
 
     // ---- S3 bucket ----
 
@@ -66,8 +69,13 @@ class AgentStack extends cdk.Stack {
       SNAPSHOT_BUCKET: bucket.bucketName,
       BEDROCK_MODEL_ID: bedrockModelId,
       BEDROCK_REGION: this.region,
+      WEATHER_LOCATION: weatherLocation,
       DISCORD_WEBHOOK_URL: discordWebhookUrl,
       NODE_OPTIONS: '--enable-source-maps',
+      // Omitted entirely (not set to '') when unconfigured: config.ts's optionalStr
+      // treats a present-but-blank value the same as absent, but omitting the key is
+      // the more honest signal that on-demand HTTP fetch triggering is off by default.
+      ...(props.fetchTriggerToken ? { FETCH_TRIGGER_TOKEN: props.fetchTriggerToken } : {}),
     };
 
     const agentFunction = new lambda.DockerImageFunction(this, 'AgentFunction', {
@@ -197,4 +205,6 @@ new AgentStack(app, STACK_NAME, {
     region: process.env.CDK_DEFAULT_REGION ?? 'us-east-1',
   },
   ...(process.env.BEDROCK_MODEL_ID ? { bedrockModelId: process.env.BEDROCK_MODEL_ID } : {}),
+  ...(process.env.WEATHER_LOCATION ? { weatherLocation: process.env.WEATHER_LOCATION } : {}),
+  ...(process.env.FETCH_TRIGGER_TOKEN ? { fetchTriggerToken: process.env.FETCH_TRIGGER_TOKEN } : {}),
 });
