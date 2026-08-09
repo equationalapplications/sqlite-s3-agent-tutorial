@@ -147,13 +147,15 @@ deploy you leave running unattended.
 
 S3 has no partial file locking, so SQLite's own locking (`WAL` mode, `IMMEDIATE`
 transactions) is blind to a second Lambda container holding its own copy in `/tmp`. What
-keeps this safe is the conditional write: every publish carries `If-Match: <the ETag we
-hydrated from>`, so a writer whose base version has moved gets a `412` instead of
-silently clobbering the winner. (Two related failures — `404 NoSuchKey` and
-`409 Conditional Request Conflict` — are translated to the same abort condition by
-`src/store/s3.ts`; the previous snapshot stays authoritative in all three cases.) That
-is optimistic concurrency control applied to a whole database file — the same pattern
-behind
+keeps this safe is the conditional write: every publish carries one. When the snapshot
+already exists, the put carries `If-Match: <the ETag we hydrated from>`; on the very
+first write — no object yet — it carries `If-None-Match: "*"` instead, a conditional
+create that fails if the key already exists. Either way, a writer whose base version has
+moved gets a `412` instead of silently clobbering the winner. (Two related failures —
+`404 NoSuchKey` and `409 Conditional Request Conflict` — are translated to the same
+abort condition by `src/store/s3.ts`; the previous snapshot stays authoritative in all
+three cases.) That is optimistic concurrency control applied to a whole database file —
+the same pattern behind
 [S3 conditional writes](https://simonwillison.net/2024/Nov/26/s3-conditional-writes/) and
 [distributed SQLite on S3](https://dev.to/chris_king_bcff3b9663e84a/why-i-built-a-distributed-sqlite-on-s3-and-why-you-might-care-3h9h).
 
