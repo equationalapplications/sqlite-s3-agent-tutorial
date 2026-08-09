@@ -143,38 +143,26 @@ valid token can run this repeatedly (a real Bedrock call and Discord post each t
 [docs/07-budget-protection.md](docs/07-budget-protection.md) before relying on this in a
 deploy you leave running unattended.
 
-## ⚠️ Concurrency Limitations & Scaling Up
+## ⚠️ Concurrency
 
-The **SQLite-rehydrated-by-S3** pattern operates under a strict **Single-Writer / Low-Concurrency** constraint. Because Amazon S3 does not support partial file locking, standard POSIX filesystem locks (`WAL` mode, `IMMEDIATE` transactions) are completely blind to concurrent AWS Lambda execution containers.
+S3 has no partial file locking, so SQLite's own locking (`WAL` mode, `IMMEDIATE`
+transactions) is blind to a second Lambda container holding its own copy in `/tmp`. What
+keeps this safe is the conditional write: every publish carries `If-Match: <the ETag we
+hydrated from>`, so a writer whose base version has moved gets a `412` instead of
+silently clobbering the winner. That is optimistic concurrency control applied to a whole
+database file — the same pattern behind
+[S3 conditional writes](https://simonwillison.net/2024/Nov/26/s3-conditional-writes/) and
+[distributed SQLite on S3](https://dev.to/chris_king_bcff3b9663e84a/why-i-built-a-distributed-sqlite-on-s3-and-why-you-might-care-3h9h).
 
-### The Split-Brain Risk
-If two Lambda functions invoke concurrently and attempt to mutate state:
-1. **Lambda A** and **Lambda B** both download the same original database file from S3.
-2. Both modify their local copy in `/tmp`.
-3. Whichever Lambda finishes last will execute `PutObject` and overwrite the other's changes completely. This results in **silent data loss** (lost updates) and state divergence.
+This tutorial treats a `412` as an abort rather than rebasing and retrying: the tick's
+database work is discarded, but the Bedrock call and Discord post it already made are
+not. On the fixed schedule with `reservedConcurrentExecutions: 1` that never fires — it
+becomes reachable as soon as a second write path (a manual trigger, say) can race the
+loop.
 
----
-
-### How to Scale Beyond Single-Writer Concurrency
-
-If your agent outgrows a single-writer schedule and requires concurrent read/write access, choose one of the following paths depending on your infrastructure preferences:
-
-#### 1. EFS Mount: The Zero-Server Alternative (Single-Writer Only With Care)
-If you want to keep using SQLite without managing a traditional database server, attach an **Amazon EFS (Elastic File System)** to your Lambda function.
-* **How it works:** AWS mounts an EFS network drive directly to `/mnt/storage` inside your Lambda container.
-* **The Benefit:** A single Lambda can `hydrate-from-EFS` instead of S3, eliminating the per-invocation S3 download.
-* **Trade-off:** Requires moving your Lambda function into a VPC, which introduces minimal network configuration overhead. **EFS is not a true multi-writer substitute for a relational database.** EFS exposes NFSv4 advisory locking only; SQLite's `WAL` mode requires POSIX shared memory that no network filesystem provides, and concurrent writers across multiple Lambda hosts risk 'database is locked' errors and (in failure cases) corruption. The hydrating-Lambda pattern (one writer at a time, S3 as the truth) is the only SQLite-on-Lambda shape the tutorial guarantees. If you genuinely need concurrent writers, skip EFS and pick a client/server database.
-
-#### 2. Litestream / Litefs: The Replication Stream
-[Litestream](https://litestream.io) runs a background sidecar process alongside SQLite that continuously streams WAL (Write-Ahead Log) frames to an S3 bucket every second.
-* **How it works:** Instead of pulling/pushing a giant database file, it replicates granular changes.
-* **The Benefit:** Drastically reduces S3 network I/O, protects against data loss down to the second, and scales read concurrency beautifully.
-* **Trade-off:** Best suited for long-running containers (ECS Fargate) rather than short-lived, ephemeral Lambda functions.
-
-#### 3. Shift to an Architectural Serverless DB
-When cross-agent transactional consistency becomes a core app requirement, migrate the SQLite relational schema and vector lookups into dedicated cloud-native databases:
-* **Relational Data:** Migrate to **Amazon Aurora Serverless v2 (PostgreSQL/MySQL)** or **DynamoDB**.
-* **Vector Engine:** If using `sqlite-vec` for RAG, migrate those embeddings into **Amazon OpenSearch Serverless**, **pgvector** (on Aurora), or **Pinecone**.
+[docs/10-concurrency.md](docs/10-concurrency.md) covers the full topology, how to add
+rebase-and-retry, the SQS single-writer queue for high contention, and why EFS is not the
+multi-writer escape hatch it looks like.
 
 ## What's here
 
@@ -189,6 +177,7 @@ When cross-agent transactional consistency becomes a core app requirement, migra
 | [docs/07-budget-protection.md](docs/07-budget-protection.md) | Setting up an AWS Budget alert, and what could actually drive cost up |
 | [docs/08-rag-vector-search.md](docs/08-rag-vector-search.md) | SQLite as a vector database too: sqlite-vec + Titan embeddings |
 | [docs/09-lesson-script.md](docs/09-lesson-script.md) | A 10-lesson script for teaching the RAG extension (frame, check-in questions, expected reasoning) |
+| [docs/10-concurrency.md](docs/10-concurrency.md) | Optimistic S3 rehydration, 412 handling, rebase-and-retry, the single-writer queue |
 | [docs/bedrock-model-comparison.md](docs/bedrock-model-comparison.md) | Why `zai.glm-4.7-flash` is the default, and alternatives |
 
 ## Cost
