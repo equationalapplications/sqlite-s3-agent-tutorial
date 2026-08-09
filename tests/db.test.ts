@@ -4,13 +4,24 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
 import { bootstrap } from '../src/db/bootstrap.js';
 import { openDatabase, openReadOnlyDatabase } from '../src/db/open.js';
 import { AGENT_DDL, SOURCE_NAMES } from '../src/db/schema.js';
 
+/** AGENT_DDL now includes a `vec0` virtual table, so any raw `new Database()` instance
+ *  in this file needs the extension loaded before `db.exec(AGENT_DDL)` — `openDatabase`
+ *  does this for production code, but these tests bypass `openDatabase` on purpose to
+ *  test the DDL in isolation. */
+function newDbWithVec(): Database.Database {
+  const db = new Database(':memory:');
+  sqliteVec.load(db);
+  return db;
+}
+
 describe('schema DDL', () => {
-  it('creates all three tables', () => {
-    const db = new Database(':memory:');
+  it('creates all three tables plus the agent_embeddings vector table', () => {
+    const db = newDbWithVec();
     db.exec(AGENT_DDL);
 
     const tables = db
@@ -21,11 +32,12 @@ describe('schema DDL', () => {
     expect(names).toContain('agent_sources');
     expect(names).toContain('agent_notifications');
     expect(names).toContain('agent_runs');
+    expect(names).toContain('agent_embeddings');
     db.close();
   });
 
   it('rejects a source name outside the closed vocabulary', () => {
-    const db = new Database(':memory:');
+    const db = newDbWithVec();
     db.exec(AGENT_DDL);
 
     expect(() =>
@@ -37,7 +49,7 @@ describe('schema DDL', () => {
   });
 
   it('accepts every name in the closed vocabulary', () => {
-    const db = new Database(':memory:');
+    const db = newDbWithVec();
     db.exec(AGENT_DDL);
 
     for (const name of SOURCE_NAMES) {
@@ -45,6 +57,29 @@ describe('schema DDL', () => {
         db.prepare(`INSERT INTO agent_sources (name) VALUES (?)`).run(name),
       ).not.toThrow();
     }
+    db.close();
+  });
+
+  it('agent_embeddings accepts a 256-dim float vector keyed by notification_id', () => {
+    const db = newDbWithVec();
+    db.exec(AGENT_DDL);
+    db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run();
+    const notificationId = db
+      .prepare(
+        `INSERT INTO agent_notifications (source, value, formatted_message, posted_at)
+         VALUES ('weather', '72F', 'Weather update: 72F', 1000)`,
+      )
+      .run().lastInsertRowid as number;
+
+    const vector = JSON.stringify(new Array(256).fill(0.1));
+    expect(() =>
+      db
+        .prepare(`INSERT INTO agent_embeddings (notification_id, embedding) VALUES (?, vec_f32(?))`)
+        .run(notificationId, vector),
+    ).not.toThrow();
+
+    const row = db.prepare(`SELECT notification_id FROM agent_embeddings`).get() as { notification_id: number };
+    expect(row.notification_id).toBe(notificationId);
     db.close();
   });
 });
@@ -124,6 +159,40 @@ describe('openReadOnlyDatabase', () => {
     ).toThrow(/readonly/i);
 
     readOnly.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('bootstrap — nearest_match columns', () => {
+  it('adds nearest_match_id and nearest_match_distance to agent_notifications', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-test-'));
+    const path = join(dir, 'memory.db');
+
+    const db = openDatabase(path);
+    bootstrap(db);
+
+    const columns = db.prepare(`PRAGMA table_info(agent_notifications)`).all() as Array<{ name: string }>;
+    const names = columns.map((c) => c.name);
+    expect(names).toContain('nearest_match_id');
+    expect(names).toContain('nearest_match_distance');
+
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('is idempotent — running bootstrap twice does not error or duplicate the columns', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-test-'));
+    const path = join(dir, 'memory.db');
+
+    const db = openDatabase(path);
+    bootstrap(db);
+    bootstrap(db); // second call must not throw "duplicate column name"
+
+    const columns = db.prepare(`PRAGMA table_info(agent_notifications)`).all() as Array<{ name: string }>;
+    const nearestMatchIdCount = columns.filter((c) => c.name === 'nearest_match_id').length;
+    expect(nearestMatchIdCount).toBe(1);
+
+    db.close();
     rmSync(dir, { recursive: true, force: true });
   });
 });
