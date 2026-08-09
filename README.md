@@ -15,7 +15,9 @@ DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." npm run local-fetch
 ```
 
 That runs the writer against a local SQLite file with no AWS involved (Phase 1). To
-deploy the real thing:
+get a Discord webhook URL, see
+[docs/06-discord-webhook-setup.md](docs/06-discord-webhook-setup.md). To deploy the
+real thing:
 
 ```bash
 export AWS_PROFILE=your-profile

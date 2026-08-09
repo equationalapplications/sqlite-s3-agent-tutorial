@@ -81,3 +81,5 @@ Marketplace subscription must already exist on the account, or `bedrock:InvokeMo
 returns `AccessDeniedException` regardless of what the IAM policy says. `cdk deploy` does
 not check for the subscription, so the stack deploys cleanly and the first `fetch` fails —
 which is why this tutorial calls it out before the first deploy rather than after.
+
+For Discord webhook setup, see [docs/06-discord-webhook-setup.md](06-discord-webhook-setup.md).

@@ -1,7 +1,7 @@
 # SQLite S3 Agent Tutorial — Design
 
 **Date:** 2026-08-08
-**Status:** Approved (ready for implementation planning)
+**Status:** Implemented (PR3) + state-invariants hardened (PR4)
 **Scope:** Public tutorial teaching the SQLite-backed-by-S3 pattern for a stateful AWS agent, by way of a working Discord notification bot.
 
 ---
@@ -14,8 +14,8 @@ The tutorial is built so that `npm run deploy` produces a working bot end-to-end
 
 **Constraints that shape every decision below:**
 
-- **Standalone.** No coupling to `aws-cloud-agent`, `core-llm-wiki`, or any other sibling repo. Reusable as a starting point for any agent with persistent state.
-- **TypeScript, Node 24, ESM.** Same toolchain family as `aws-cloud-agent`.
+- **Standalone.** Reusable as a starting point for any agent with persistent state. No coupling to any external repo.
+- **TypeScript, Node 24, ESM.** Modern, ESM-native, strict.
 - **Public tutorial quality.** Every non-obvious decision explained in `docs/`. No "we do X because reasons" — the *why* is the value.
 - **No VPC, no DB server.** SQLite file in S3, hydrated to `/tmp` per invocation.
 - **Region pinned to `us-east-1`.** AWS CDK, single stack, single S3 bucket.
@@ -122,7 +122,7 @@ One Lambda function, two ops, one S3 bucket, one SQLite file.
 5.  Return JSON: { snapshotVersion, sources: [...], recentNotifications: [...] }
 ```
 
-The version cache (§4.3) is what makes warm invocations cheap. `setup()` here is just opening a SQLite file, so the payoff is smaller than `aws-cloud-agent`'s MiniSearch rebuild — but the *mechanism* is the same, and the tutorial teaches it.
+The version cache (§4.3) is what makes warm invocations cheap. The mechanism is the same one any warm-cache pattern uses: hold a pointer to the last loaded resource, validate it against the source's current version on each access, and reload only when it has changed. The tutorial teaches that mechanism in its simplest form.
 
 ---
 
@@ -158,15 +158,30 @@ The reader keeps the last hydrated ETag in module scope. Each invocation:
 
 **Why a separate local path from the writer's.** The writer mutates its local copy on every invocation — including the conditional-write failure path, where a 412 from S3 leaves the writer's local file with the `outcome='error'` run row recorded but S3's ETag unchanged. If the reader shared the writer's local path, the reader's ETag cache hit would answer from the still-open reader handle against those locally-mutated bytes, even though the authoritative S3 snapshot did not change. Disjoint local paths keep the reader's view strictly in step with what the writer has actually published.
 
-**Why close-and-reopen rather than reuse the open handle?** `better-sqlite3` keeps a page cache in memory. If the file on disk changes underneath an open handle, the cache describes a file that no longer exists — silently wrong answers, no error. The mechanism is the same one `aws-cloud-agent` uses for the same reason.
+**Why close-and-reopen rather than reuse the open handle?** `better-sqlite3` keeps a page cache in memory. If the file on disk changes underneath an open handle, the cache describes a file that no longer exists — silently wrong answers, no error. Closing the handle before overwrite is what prevents that.
 
 The version cache is what makes warm reader invocations cheap. On a warm Lambda, an unchanged DB costs a `HEAD` and a query. A cold Lambda or a new snapshot pays one `GetObject` and one handle open. This is the headline benefit of the pattern; the tutorial teaches it explicitly.
+
+### 4.3.1 Partial-failure state invariants
+
+The reader's `ReaderState` has two fields — `cachedEtag` and `db` — and exactly two valid combinations:
+
+- `(cachedEtag: <string>, db: <open handle>)` — the cache holds a valid snapshot.
+- `(cachedEtag: null, db: undefined)` — the cache is empty.
+
+Any other combination is a bug. The cache-miss branch must preserve this invariant across every failure mode:
+
+- **`openReadOnlyDatabase` throws** (corrupted snapshot, non-SQLite bytes, disk error): `state.db` stays `undefined`, `state.cachedEtag` stays at its prior value (or `null` on a cold start). The error propagates up — the Lambda returns 500, the next call retries the cache-miss path from scratch.
+- **`GetObject` returns `null` after a successful `HEAD`** (transient S3 race, object deleted between calls): `state.cachedEtag` is reset to `null`, the empty-state JSON is returned. The next call retries cleanly.
+- **`GetObject` returns `NoSuchKey`** (no snapshot yet — `fetch` has never run): identical to the `null` case above.
+
+The retry loop on a permanently broken S3 object is unavoidable — it terminates when the operator or the writer fixes the underlying object. The invariant is what prevents the loop from behaving incorrectly (e.g., returning stale data from a closed handle) while it runs.
 
 ---
 
 ## 5. Schema
 
-Three tables, prefixed `agent_` (matching `aws-cloud-agent`'s convention) so future migrations stay collision-free.
+Three tables, prefixed `agent_` so future migrations stay collision-free.
 
 ```sql
 CREATE TABLE agent_sources (
@@ -207,7 +222,7 @@ CREATE TABLE agent_runs (
 
 **Why both `value` and `formatted_message`.** Dedup compares the raw fetched value (`72F` vs `72.1F`) — a stable, byte-for-byte check. The LLM-generated message is downstream of dedup and never used for it. Storing both lets the status op show what was posted without recomputing the LLM call, and lets future schema migrations (e.g. switching models) leave the dedup state untouched.
 
-**`outcome` and `error` are nullable on purpose.** A run row inserted at step 4 of the writer lifecycle (§3.1) and never updated is itself a record: "this run started and never finished." That signal is lost if the columns default to a fake value. Same pattern as `aws-cloud-agent`'s `agent_runs`.
+**`outcome` and `error` are nullable on purpose.** A run row inserted at step 4 of the writer lifecycle (§3.1) and never updated is itself a record: "this run started and never finished." That signal is lost if the columns default to a fake value.
 
 **`source` is a closed vocabulary.** `weather` and `crypto` only. The tutorial is intentionally narrow — readers extend it by editing one CHECK constraint and one fetch function, not by designing a registry. The constraint prevents typos like `wether` from silently producing empty dedup state.
 
@@ -235,7 +250,7 @@ Categorised, with the right response for each. The reader of the tutorial should
 
 **`outcome = 'error'` is reserved for failures that abort the whole run after step 4** (i.e., after the `agent_runs` row has been inserted). Per-source failures inside the loop set `outcome = 'success'` and append to `agent_runs.error`; the run still completes its loop. Failures before step 4 bubble up and leave no `agent_runs` row — they appear in CloudWatch only.
 
-**The principle: every error category has exactly one right answer, and it's the same answer every time.** `aws-cloud-agent`'s design calls this out explicitly in its §6 prose; the tutorial does the same because it teaches a habit, not just a pattern.
+**The principle: every error category has exactly one right answer, and it's the same answer every time.** The tutorial teaches a habit, not just a pattern.
 
 **`agent_runs.error` is one column, plural messages concatenated.** Per-source failures inside a multi-source run are joined with `; `. The tutorial teaches "one column per log line" rather than a sidecar table, because the table is a tutorial artefact, not a query surface.
 
@@ -243,7 +258,7 @@ Categorised, with the right response for each. The reader of the tutorial should
 
 ## 7. Testing
 
-Tests run against a **real SQLite file** with a real `better-sqlite3` handle — no mocks of the database. `aws-cloud-agent`'s design calls this out explicitly ("the library's actual behaviour is the thing under test") and the tutorial adopts the same principle. Network boundaries are mocked because Discord and external APIs are out of our control.
+Tests run against a **real SQLite file** with a real `better-sqlite3` handle — no mocks of the database. The library's actual behaviour is the thing under test, not a re-implementation of it. Network boundaries are mocked because Discord and external APIs are out of our control.
 
 **Runner and scripts.** The test runner is Vitest. `npm test` invokes `vitest run` via the `test` script in `package.json`; `vitest.config.ts` (see §10) is the runner config. The same script is what `npm run local-fetch` and the phases in §9 reference — the reader's CLI experience matches the text without any runner translation in between.
 
@@ -252,7 +267,7 @@ Tests run against a **real SQLite file** with a real `better-sqlite3` handle —
 | Boundary | Mocked? | How |
 |---|---|---|
 | `better-sqlite3` | No | Real SQLite file in `/tmp` per test. |
-| S3 client | Yes | `aws-sdk-client-mock` (matches `aws-cloud-agent`). |
+| S3 client | Yes | `aws-sdk-client-mock`. |
 | Discord webhook | Yes | A `DiscordPoster` interface; production = real `fetch`, tests = in-memory recorder. |
 | External value API | Yes | A `SourceFetcher` interface keyed by source name; production = real `fetch`, tests = returns canned values. |
 | `MessageFormatter` (Bedrock) | Yes | A `MessageFormatter` interface; production = `BedrockFormatter` (real `Converse` call against `bedrockModelId`), tests = `LocalTemplateFormatter` (same interface, deterministic output, no AWS). The writer is tested with `LocalTemplateFormatter`; the formatter itself is tested by separate unit tests that mock the Bedrock client. |
@@ -270,7 +285,7 @@ Tests run against a **real SQLite file** with a real `better-sqlite3` handle —
 
 ### 7.3 Smoke test
 
-`scripts/smoke.sh` invokes the deployed `fetch` op, waits for the run, then invokes `status` and asserts the JSON contains a `weather` source with a `lastValue`. Matches `aws-cloud-agent`'s smoke pattern; tutorial readers can run it after deploy to verify end-to-end.
+`scripts/smoke.sh` invokes the deployed `fetch` op, waits for the run, then invokes `status` and asserts the JSON contains a `weather` source with a `lastValue`. Tutorial readers can run it after deploy to verify end-to-end.
 
 ---
 
@@ -281,7 +296,7 @@ Deliberate. Not built, even where it appears to be the natural next step.
 - **A web dashboard.** The reader is a JSON endpoint (§2). A dashboard is a separate tutorial.
 - **Multi-tenancy, multiple Discord channels.** The tutorial targets one webhook. Configuration extension is left to the reader.
 - **Vector search, embeddings, semantic dedup.** Dedup is byte-for-byte equality on the source value. If "weather changed from 72F to 72.0F" should count as a change, that's a future tutorial's problem. LLM output (the friendly message) is *not* used for dedup — only the raw fetched value is.
-- **A `social` retrieval profile, episodic tiers, ontology, outbox.** All `aws-cloud-agent`-specific concepts, all intentionally omitted.
+- **An ontology, semantic retrieval profiles, episodic memory tiers, outbox patterns.** All project-specific concepts that grew up around richer knowledge-graph workloads, intentionally omitted.
 - **VPC, NAT Gateway, RDS, Aurora, DynamoDB.** A single SQLite file in S3 is the whole storage layer.
 - **Multi-region replication, cross-region disaster recovery.** Single-region, single-bucket.
 - **Adaptive cron, schedule overrides, conditional schedules.** The EventBridge schedule is a static rate expression.
@@ -318,7 +333,7 @@ sqlite-s3-agent-tutorial/
 │   ├── 02-rehydration.md            # §4 in long form
 │   ├── 03-schema.md                 # §5 in long form
 │   ├── 04-extending.md              # how to add a third source
-│   └── 05-from-tutorial-to-prod.md  # the deltas vs aws-cloud-agent
+│   └── 05-from-tutorial-to-prod.md  # the deltas vs running this in production
 ├── infra/
 │   ├── stack.ts                     # CDK: bucket, function, schedule, URL
 │   └── cdk.json
@@ -357,14 +372,14 @@ sqlite-s3-agent-tutorial/
 │   ├── format.test.ts               # MessageFormatter contract (LocalTemplateFormatter)
 │   ├── bedrock.test.ts              # BedrockFormatter with aws-sdk-client-mock
 │   └── bootstrap.test.ts
-├── Dockerfile                       # arm64 cross-compile block (§8.5 of aws-cloud-agent)
+├── Dockerfile                       # arm64 cross-compile block
 ├── package.json
 ├── tsconfig.json
 ├── tsconfig.check.json
 └── vitest.config.ts
 ```
 
-`docs/01-architecture.md` is the tutorial's *narrative*. The code is the working example; the docs explain why each piece exists. `docs/05-from-tutorial-to-prod.md` is a closing piece that points at `aws-cloud-agent` for readers who outgrow the tutorial — making the lineage explicit.
+`docs/01-architecture.md` is the tutorial's *narrative*. The code is the working example; the docs explain why each piece exists. `docs/05-from-tutorial-to-prod.md` is a closing piece that describes what changes when this tutorial's defaults are no longer the right trade-offs — a checklist for readers who outgrow it.
 
 ---
 
@@ -454,7 +469,7 @@ Each Bedrock exception maps to one recovery action; the `Converse` wrapper in `B
 1. Pick a model id from the Bedrock catalog.
 2. Enable it in *Model access* (§12.1) — including EULA acceptance for Anthropic.
 3. Update `bedrockModelId` in `src/config.ts` (or env).
-4. If the family is not `zai`, add a registry entry — *only after a live probe* of accepted prefixes and request shape. The probe procedure is documented in the sibling repo (`aws-cloud-agent/docs/superpowers/specs/2026-08-02-model-provider-adapter-design.md` §5). The four-step procedure is mandatory, including the negative control: some families accept unknown request fields silently, so "the request did not 400" is not evidence a field is supported.
+4. If the family is not `zai`, add a registry entry — *only after a live probe* of accepted prefixes and request shape. The four-step procedure is mandatory, including the negative control: some families accept unknown request fields silently, so "the request did not 400" is not evidence a field is supported.
 5. Re-run `cdk synth` and `cdk deploy` — the IAM grant narrows or widens to match the new family.
 
 ### 12.6 Cost reference

@@ -23,14 +23,13 @@ durable, versioned, and — critically for this pattern — supports conditional
 
 ## Why one Lambda, not two
 
-`aws-cloud-agent`, the sibling project this tutorial is drawn from, uses two Lambdas — a
-writer and a reader — because its reader also runs semantic search backed by a vector
-index that needs its own warm-container lifecycle tuning. This tutorial's reader is a
-much smaller job: query two tables and return JSON. Splitting it into a second Lambda
-would mean a second container image, a second set of IAM grants, and a second cold-start
-budget — for a query that returns in single-digit milliseconds once hydrated. One function
-with an `op` field is simpler and the tutorial's job is to teach the storage pattern, not
-Lambda topology.
+A more ambitious agent might split the reader into its own Lambda — say, when the reader
+also runs semantic search backed by a vector index that needs its own warm-container
+lifecycle tuning. This tutorial's reader is a much smaller job: query two tables and
+return JSON. Splitting it into a second Lambda would mean a second container image, a
+second set of IAM grants, and a second cold-start budget — for a query that returns in
+single-digit milliseconds once hydrated. One function with an `op` field is simpler and
+the tutorial's job is to teach the storage pattern, not Lambda topology.
 
 ## The single-writer invariant
 

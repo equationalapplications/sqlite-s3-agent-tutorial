@@ -112,12 +112,19 @@ export function createStatusReader(dbPath: string): StatusReader {
           // HEAD succeeded but GET raced a delete between the two calls — treat as
           // no-snapshot rather than throwing, since the outcome the caller cares about
           // (nothing to query) is identical to the head === null branch above.
+          // Reset cachedEtag so the next call retries cleanly rather than leaving
+          // (cachedEtag=oldEtag, db=undefined), an invalid state per spec §4.3.1.
+          state.cachedEtag = null;
           return { snapshotVersion: null, sources: [], recentNotifications: [] };
         }
 
         writeFileSync(dbPath, object.body);
-        state.cachedEtag = object.etag;
+        // Assign cachedEtag only after openReadOnlyDatabase succeeds — if open throws,
+        // cachedEtag stays at its prior value (or null) and the next call retries cleanly
+        // instead of leaving (cachedEtag=newEtag, db=undefined), an invalid state per
+        // spec §4.3.1.
         state.db = openReadOnlyDatabase(dbPath);
+        state.cachedEtag = object.etag;
       }
 
       return queryStatus(state.db as Database.Database, state.cachedEtag as string);

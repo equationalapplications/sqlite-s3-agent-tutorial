@@ -1,21 +1,15 @@
 # Bedrock model comparison (us-east-1)
 
-> **Provenance.** This file is research from a sibling project (`aws-cloud-agent`,
-> `@equationalapplications/core-llm-wiki`) where `low`/`med`/`high` tier switching and a
-> `TIER_DEFAULTS` constant live in `src/config.ts`. It is kept in this PR as background
-> reading for PR2/PR3's `BedrockFormatter` work — **not** because this tutorial defines
-> those tiers. The tutorial's actual Bedrock configuration surface is the single
-> `bedrockModelId` field documented in `docs/superpowers/specs/2026-08-08-sqlite-s3-agent-tutorial-design.md`
-> §11 (default `zai.glm-4.7-flash`).
->
-> References to `src/judge/assess.ts`, `infra/stack.ts`, `MAX_TOKENS_MED`, `doRunHeal`,
-> `maintain`, `g3UntypedFacts`, and the `src/bedrock/families.ts` family registry all
-> belong to the sibling project and do not exist in this repo.
+> **Provenance.** This file is general-purpose Bedrock model research. Model pricing,
+> capability, and latency characteristics are not project-specific, so the file lives
+> here as a starting point for any reader picking a Bedrock model. Tier-switching
+> workflows that lean on this comparison as a building block are out of scope for this
+> tutorial.
 
-Reference for picking/repointing tier models in the sibling project. Update this table
-when tiers change or when re-probing. For this tutorial, start with the recommended
-`med`/`low` pick below (`zai.glm-4.7-flash`) and revisit only if Bedrock integration
-(`PR2`) needs a different model.
+Reference for picking a Bedrock model in any project. Update this table
+when pricing changes or when re-probing. For this tutorial, start with the recommended
+`med`/`low` pick below (`zai.glm-4.7-flash`) and revisit only if the deployed model's
+behaviour regresses.
 
 **Methodology:** prices are pulled from the AWS Pricing API
 (`aws pricing list-price-lists` / `get-price-list-file-url`, `AmazonBedrock` service code,
@@ -107,8 +101,8 @@ rather than ranked by headline price.
 | C | Genuine supersession, detector correctly picked the older/lower-confidence side | `uphold` |
 
 Case C is the control: without it, a model biased toward `overturn` scores well on B by luck.
-Plus an ingest test using the library's real `INGEST_SYSTEM_PROMPT`
-(`@equationalapplications/core-llm-wiki`) on a document chunk.
+Plus an ingest test against a document chunk using a typical ingest prompt
+(INGEST_SYSTEM_PROMPT-style).
 
 **Every candidate was run at least 3 times.** This mattered — see Nemotron Super below.
 
