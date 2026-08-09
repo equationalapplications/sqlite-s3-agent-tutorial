@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^13.0.1",
+    "sqlite-vec": "^0.1.9",
     "@aws-sdk/client-bedrock-runtime": "^3.1103.0",
     "@aws-sdk/client-s3": "^3.1103.0"
   },

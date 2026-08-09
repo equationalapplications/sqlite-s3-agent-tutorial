@@ -63,6 +63,44 @@ describe('createBedrockFormatter', () => {
     );
   });
 
+  it('includes the closest past reading in the prompt when one is provided', async () => {
+    bedrock.on(ConverseCommand).resolves(textResponse('Similar to last time!'));
+
+    const formatter = createBedrockFormatter({
+      client,
+      modelId: 'zai.glm-4.7-flash',
+      region: 'us-east-1',
+      maxOutputTokens: 512,
+    });
+
+    await formatter.format('weather', '73F', {
+      formattedMessage: 'Looks like 72F today!',
+      postedAt: Date.parse('2026-08-01T00:00:00Z'),
+    });
+
+    const calls = bedrock.commandCalls(ConverseCommand);
+    const userText = calls[0]?.args[0].input?.messages?.[0]?.content?.[0]?.text ?? '';
+    expect(userText).toContain('Looks like 72F today!');
+    expect(userText).toContain('2026-08-01');
+  });
+
+  it('omits any past-reading line when nearestMatch is null or omitted', async () => {
+    bedrock.on(ConverseCommand).resolves(textResponse('No history yet!'));
+
+    const formatter = createBedrockFormatter({
+      client,
+      modelId: 'zai.glm-4.7-flash',
+      region: 'us-east-1',
+      maxOutputTokens: 512,
+    });
+
+    await formatter.format('weather', '73F', null);
+
+    const calls = bedrock.commandCalls(ConverseCommand);
+    const userText = calls[0]?.args[0].input?.messages?.[0]?.content?.[0]?.text ?? '';
+    expect(userText).not.toContain('Closest past reading');
+  });
+
   it('throws a descriptive error on AccessDeniedException', async () => {
     bedrock.on(ConverseCommand).rejects({ name: 'AccessDeniedException', message: 'denied' });
 

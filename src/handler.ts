@@ -6,6 +6,7 @@ import { runFetch } from './agent/fetch.js';
 import { createStatusReader, type StatusReader } from './agent/status.js';
 import { loadConfig } from './config.js';
 import { createFetchDiscordPoster } from './discord/poster.js';
+import { createTitanEmbedder } from './embed/titan.js';
 import { createBedrockFormatter } from './format/bedrock.js';
 import { createSourceFetcher } from './sources/index.js';
 import type { SourceFetcher, SourceName } from './sources/types.js';
@@ -166,6 +167,7 @@ export async function runHandler(
     region: config.bedrockRegion,
     maxOutputTokens: config.bedrockMaxOutputTokens,
   });
+  const embedder = createTitanEmbedder({ client: bedrockClient, region: config.bedrockRegion });
 
   const sources: SourceFetcher[] = config.sources.map((name) => {
     const override = sourceOverrides[name];
@@ -182,6 +184,7 @@ export async function runHandler(
     sources,
     poster: createFetchDiscordPoster(config.discordWebhookUrl),
     formatter,
+    embedder,
   });
 
   return { statusCode: 200, body: JSON.stringify(result) };

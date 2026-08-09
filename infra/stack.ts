@@ -100,7 +100,13 @@ class AgentStack extends cdk.Stack {
     const bedrockPolicy = new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
-      resources: buildBedrockResources(bedrockModelId, this.region),
+      resources: [
+        ...buildBedrockResources(bedrockModelId, this.region),
+        // Titan Text Embeddings V2 for RAG (RAG design spec §8) — fixed, unlike the chat
+        // model: it isn't configurable, so it needs no family-resolution branch through
+        // buildBedrockResources.
+        `arn:aws:bedrock:${this.region}::foundation-model/amazon.titan-embed-text-v2:0`,
+      ],
     });
     agentFunction.addToRolePolicy(bedrockPolicy);
 

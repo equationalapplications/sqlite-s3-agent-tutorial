@@ -7,6 +7,7 @@ import { bootstrap } from '../src/db/bootstrap.js';
 import { openDatabase } from '../src/db/open.js';
 import { createLocalStore } from '../src/store/local.js';
 import { createLocalTemplateFormatter } from '../src/format/local.js';
+import { createLocalEmbedder } from '../src/embed/local.js';
 import { runFetch } from '../src/agent/fetch.js';
 import { fakeSourceFetcher, throwingSourceFetcher } from './helpers/fakeSourceFetcher.js';
 import { fakeDiscordPoster } from './helpers/fakeDiscordPoster.js';
@@ -47,6 +48,7 @@ describe('runFetch', () => {
       sources: [fakeSourceFetcher('weather', ['72F'])],
       poster,
       formatter: countingFormatter,
+      embedder: createLocalEmbedder(),
       runId: 'r1',
       now: () => 1000,
     });
@@ -87,6 +89,7 @@ describe('runFetch', () => {
           return `${source}: ${value}`;
         },
       },
+      embedder: createLocalEmbedder(),
       runId: 'r1',
       now: () => 1000,
     });
@@ -116,6 +119,7 @@ describe('runFetch', () => {
       sources: [fakeSourceFetcher('weather', ['73F'])],
       poster,
       formatter: createLocalTemplateFormatter(),
+      embedder: createLocalEmbedder(),
       runId: 'r1',
       now: () => 1000,
     });
@@ -149,6 +153,7 @@ describe('runFetch', () => {
       ],
       poster,
       formatter: createLocalTemplateFormatter(),
+      embedder: createLocalEmbedder(),
       runId: 'r1',
       now: () => 1000,
     });
@@ -184,6 +189,7 @@ describe('runFetch', () => {
       ],
       poster,
       formatter: failingFormatter,
+      embedder: createLocalEmbedder(),
       runId: 'r1',
       now: () => 1000,
     });
@@ -207,6 +213,7 @@ describe('runFetch', () => {
       sources: [fakeSourceFetcher('weather', ['72F'])],
       poster: fakeDiscordPoster(),
       formatter: createLocalTemplateFormatter(),
+      embedder: createLocalEmbedder(),
       runId: 'r1',
       now: () => 1000,
     });
@@ -234,6 +241,7 @@ describe('runFetch', () => {
         sources: [fakeSourceFetcher('weather', ['73F'])],
         poster: fakeDiscordPoster(),
         formatter: createLocalTemplateFormatter(),
+        embedder: createLocalEmbedder(),
         runId: 'r2',
         now: () => 2000,
       }),
@@ -246,6 +254,111 @@ describe('runFetch', () => {
     const runRow = reopened.prepare(`SELECT outcome, error FROM agent_runs WHERE run_id = 'r2'`).get() as { outcome: string; error: string };
     expect(runRow.outcome).toBe('error');
     expect(runRow.error).toMatch(/PreconditionFailed/);
+    reopened.close();
+    ctx.cleanup();
+  });
+
+  it('records nearest_match_id/nearest_match_distance pointing at a prior same-source notification', async () => {
+    await runFetch({
+      dbPath: ctx.dbPath,
+      store: ctx.store,
+      storeKey: 'memory.db',
+      sources: [fakeSourceFetcher('weather', ['72F'])],
+      poster: fakeDiscordPoster(),
+      formatter: createLocalTemplateFormatter(),
+      embedder: createLocalEmbedder(),
+      runId: 'r1',
+      now: () => 1000,
+    });
+    await runFetch({
+      dbPath: ctx.dbPath,
+      store: ctx.store,
+      storeKey: 'memory.db',
+      sources: [fakeSourceFetcher('weather', ['75F'])],
+      poster: fakeDiscordPoster(),
+      formatter: createLocalTemplateFormatter(),
+      embedder: createLocalEmbedder(),
+      runId: 'r2',
+      now: () => 2000,
+    });
+
+    const reopened = openDatabase(ctx.dbPath);
+    const rows = reopened
+      .prepare(`SELECT id, nearest_match_id, nearest_match_distance FROM agent_notifications ORDER BY id`)
+      .all() as Array<{ id: number; nearest_match_id: number | null; nearest_match_distance: number | null }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]?.nearest_match_id).toBeNull(); // first-ever weather notification: no history to match
+    expect(rows[0]?.nearest_match_distance).toBeNull();
+    expect(rows[1]?.nearest_match_id).toBe(rows[0]?.id);
+    expect(typeof rows[1]?.nearest_match_distance).toBe('number');
+    reopened.close();
+    ctx.cleanup();
+  });
+
+  it('does not match a different source\'s prior notification (same-source filtering)', async () => {
+    await runFetch({
+      dbPath: ctx.dbPath,
+      store: ctx.store,
+      storeKey: 'memory.db',
+      sources: [fakeSourceFetcher('weather', ['72F'])],
+      poster: fakeDiscordPoster(),
+      formatter: createLocalTemplateFormatter(),
+      embedder: createLocalEmbedder(),
+      runId: 'r1',
+      now: () => 1000,
+    });
+    await runFetch({
+      dbPath: ctx.dbPath,
+      store: ctx.store,
+      storeKey: 'memory.db',
+      sources: [fakeSourceFetcher('crypto', ['67234.10'])],
+      poster: fakeDiscordPoster(),
+      formatter: createLocalTemplateFormatter(),
+      embedder: createLocalEmbedder(),
+      runId: 'r2',
+      now: () => 2000,
+    });
+
+    const reopened = openDatabase(ctx.dbPath);
+    const cryptoRow = reopened
+      .prepare(`SELECT nearest_match_id FROM agent_notifications WHERE source = 'crypto'`)
+      .get() as { nearest_match_id: number | null };
+    expect(cryptoRow.nearest_match_id).toBeNull();
+    reopened.close();
+    ctx.cleanup();
+  });
+
+  it('embedding failure is isolated: notification still posts, error recorded, nearest_match stays null', async () => {
+    const poster = fakeDiscordPoster();
+    const throwingEmbedder = {
+      async embed(): Promise<number[]> {
+        throw new Error('Titan throttled');
+      },
+    };
+
+    const result = await runFetch({
+      dbPath: ctx.dbPath,
+      store: ctx.store,
+      storeKey: 'memory.db',
+      sources: [fakeSourceFetcher('weather', ['72F'])],
+      poster,
+      formatter: createLocalTemplateFormatter(),
+      embedder: throwingEmbedder,
+      runId: 'r1',
+      now: () => 1000,
+    });
+
+    expect(result.outcome).toBe('success');
+    expect(poster.posted).toEqual(['Weather update: 72F']); // post still happens despite embed failure
+
+    const reopened = openDatabase(ctx.dbPath);
+    const run = reopened.prepare(`SELECT error FROM agent_runs WHERE run_id = 'r1'`).get() as { error: string };
+    expect(run.error).toMatch(/Titan throttled/);
+
+    const notification = reopened
+      .prepare(`SELECT nearest_match_id FROM agent_notifications`)
+      .get() as { nearest_match_id: number | null };
+    expect(notification.nearest_match_id).toBeNull();
     reopened.close();
     ctx.cleanup();
   });

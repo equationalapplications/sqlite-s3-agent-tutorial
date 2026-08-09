@@ -3,8 +3,11 @@
 export const SOURCE_NAMES = ['weather', 'crypto'] as const;
 export type SourceName = (typeof SOURCE_NAMES)[number];
 
-/** DDL for all three tables. Applied via `CREATE TABLE IF NOT EXISTS`, so re-running it
- *  against an already-bootstrapped database is a no-op (spec §4.1). */
+/** DDL for all tables, including the `agent_embeddings` vector table (RAG design spec
+ *  §3.1). Applied via `CREATE TABLE IF NOT EXISTS` / `CREATE VIRTUAL TABLE IF NOT
+ *  EXISTS`, so re-running it against an already-bootstrapped database is a no-op (spec
+ *  §4.1). Requires the `sqlite-vec` extension to already be loaded on the connection —
+ *  `openDatabase` (src/db/open.ts) does this before `bootstrap()` runs. */
 export const AGENT_DDL = `
 CREATE TABLE IF NOT EXISTS agent_sources (
   name              TEXT PRIMARY KEY,
@@ -37,5 +40,10 @@ CREATE TABLE IF NOT EXISTS agent_runs (
   error               TEXT,
   CONSTRAINT chk_op      CHECK (op IN ('fetch', 'status')),
   CONSTRAINT chk_outcome CHECK (outcome IS NULL OR outcome IN ('success', 'error'))
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS agent_embeddings USING vec0(
+  notification_id INTEGER PRIMARY KEY,
+  embedding        FLOAT[256] distance_metric=cosine
 );
 `;

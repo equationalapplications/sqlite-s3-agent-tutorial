@@ -1,7 +1,7 @@
 # RAG via sqlite-vec + Titan Embeddings — Design
 
 **Date:** 2026-08-08
-**Status:** Proposed
+**Status:** Implemented
 **Scope:** Extends the existing SQLite-S3 agent tutorial to demonstrate that the same single SQLite file can also serve as a vector store — no separate vector database needed. The agent embeds each notification it posts and, on the next new value for that source, mentions the most similar past result.
 
 ---

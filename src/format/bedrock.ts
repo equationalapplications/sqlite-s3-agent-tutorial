@@ -1,7 +1,7 @@
 import { type BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 import type { SourceName } from '../db/schema.js';
 import { resolveFamily } from './families.js';
-import type { MessageFormatter } from './types.js';
+import type { MessageFormatter, SimilarPastResult } from './types.js';
 
 export interface BedrockFormatterOptions {
   client: BedrockRuntimeClient;
@@ -34,10 +34,14 @@ function delay(ms: number): Promise<void> {
 const SYSTEM_PROMPT =
   'You write a single short, friendly Discord notification message announcing a new ' +
   'value for a tracked data source. Reply with the message text only — no quotes, no ' +
-  'preamble, no markdown formatting.';
+  'preamble, no markdown formatting. If a closest past reading is included below, you ' +
+  'may naturally reference it if relevant, but you are not required to.';
 
-function buildUserPrompt(source: SourceName, rawValue: string): string {
-  return `Source: ${source}\nNew value: ${rawValue}`;
+function buildUserPrompt(source: SourceName, rawValue: string, similarPast?: SimilarPastResult | null): string {
+  const base = `Source: ${source}\nNew value: ${rawValue}`;
+  if (similarPast === null || similarPast === undefined) return base;
+  const date = new Date(similarPast.postedAt).toISOString().slice(0, 10);
+  return `${base}\nClosest past reading (${date}): "${similarPast.formattedMessage}"`;
 }
 
 /** Maps a Bedrock exception to a message naming the fix (spec §6, §12.4). */
@@ -87,12 +91,12 @@ function isThrottlingOr5xx(error: unknown): boolean {
  * other exception is not retried — access and validation failures are not transient.
  */
 export function createBedrockFormatter(options: BedrockFormatterOptions): MessageFormatter {
-  async function attempt(source: SourceName, rawValue: string): Promise<string> {
+  async function attempt(source: SourceName, rawValue: string, similarPast?: SimilarPastResult | null): Promise<string> {
     const response = await options.client.send(
       new ConverseCommand({
         modelId: composedModelId(options.modelId),
         system: [{ text: SYSTEM_PROMPT }],
-        messages: [{ role: 'user', content: [{ text: buildUserPrompt(source, rawValue) }] }],
+        messages: [{ role: 'user', content: [{ text: buildUserPrompt(source, rawValue, similarPast) }] }],
         inferenceConfig: { maxTokens: options.maxOutputTokens },
       }),
     );
@@ -105,14 +109,14 @@ export function createBedrockFormatter(options: BedrockFormatterOptions): Messag
   }
 
   return {
-    async format(source: SourceName, rawValue: string): Promise<string> {
+    async format(source: SourceName, rawValue: string, similarPast?: SimilarPastResult | null): Promise<string> {
       try {
-        return await attempt(source, rawValue);
+        return await attempt(source, rawValue, similarPast);
       } catch (error: unknown) {
         if (isThrottlingOr5xx(error)) {
           await delay(RETRY_DELAY_MS);
           try {
-            return await attempt(source, rawValue);
+            return await attempt(source, rawValue, similarPast);
           } catch (retryError: unknown) {
             throw mapBedrockError(retryError, options);
           }
