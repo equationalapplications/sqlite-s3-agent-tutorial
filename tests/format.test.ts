@@ -1,8 +1,13 @@
 // tests/format.test.ts
 import { describe, expect, it } from 'vitest';
 import { createLocalTemplateFormatter } from '../src/format/local.js';
+import type { LoopContext } from '../src/format/types.js';
 
-const ctx = (readings: Array<{ source: 'weather' | 'crypto'; value: string }>, date = '2026-08-09', location = 'NYC') => ({
+const ctx = (
+  readings: Array<{ source: 'weather' | 'crypto'; value: string }>,
+  date = '2026-08-09',
+  location = 'NYC',
+): LoopContext => ({
   date,
   location,
   readings,

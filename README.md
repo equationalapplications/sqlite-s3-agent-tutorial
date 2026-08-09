@@ -44,10 +44,10 @@ what breaks if you skip it.
 
 ## Loop mode
 
-For local testing and quick iteration, the agent can run a 5-minute loop instead of
-the once-daily schedule. After the same `npm run deploy` as for the daily schedule,
-toggle the loop on and off directly from your shell — no Lambda invocation, no token,
-no extra IAM grants:
+The deployed EventBridge schedule runs every 5 minutes by default. Use `loop-stop` to
+pause the loop, and re-run `loop-start` only after `loop-stop` to resume it. Both
+scripts toggle the EventBridge rule directly from your shell — no Lambda invocation,
+no token, no extra IAM grants:
 
 ```bash
 npm run loop-start   # calls `aws events enable-rule` on the deployed rule

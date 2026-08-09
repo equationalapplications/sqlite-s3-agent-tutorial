@@ -1,7 +1,7 @@
 # Budget protection
 
 This tutorial's normal cost is near zero — see [the README's Cost section](../README.md#cost).
-But three things can push it above "near zero" if misconfigured, and none of them are
+But four things can push it above "near zero" if misconfigured, and none of them are
 caught by anything else in this repo: they're all *valid* requests that just happen more
 often than intended.
 
@@ -35,7 +35,7 @@ error, and the right backstop for operator error is a spending alarm, not more c
 
 ## Set up an AWS Budget
 
-A cost budget with an email (or SNS) alert takes a few minutes and catches all three cases
+A cost budget with an email (or SNS) alert takes a few minutes and catches all four cases
 above, since all of them show up as spend regardless of which one caused it.
 
 Console: **Billing and Cost Management → Budgets → Create budget → Cost budget**. Suggested

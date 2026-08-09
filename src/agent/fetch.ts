@@ -34,6 +34,55 @@ export interface RunFetchResult {
   error: string | null;
 }
 
+/** Discord's hard cap on webhook message content. A webhook POST with a `content`
+ *  field over this length is rejected with a 400 before notification/embedding
+ *  persistence — so the writer must bound the final message here, not at the poster.
+ *  See https://docs.discord.com/developers/resources/webhook#execute-webhook. */
+export const DISCORD_MAX_MESSAGE_CHARS = 2000;
+
+const REMINDS_ME_OF_SEPARATOR = '\n\nReminds me of: ';
+const SUFFIX_TRUNCATION_MARKER = '...';
+
+/**
+ * Builds the message posted to Discord from the LLM's pre-suffix output and the
+ * optional RAG match. Enforces Discord's 2000-character hard cap so a malformed
+ * LLM output or an unexpectedly long past `base_message` cannot cause Discord to
+ * reject the post before the notification/embedding persistence step.
+ *
+ * Rules:
+ *  - If `preMessage` is longer than the cap on its own, truncate it and return
+ *    (no suffix — the preMessage cannot be preserved once it doesn't fit).
+ *  - If the full suffix (`"\n\nReminds me of: <baseMessage>"`) fits, use it whole.
+ *  - If the suffix does not fit but there is room for at least a clipped version,
+ *    truncate `baseMessage` to fit and append `...` as a clip marker.
+ *  - If there is not even room for the separator, omit the suffix entirely.
+ */
+export function buildFinalMessageForDiscord(
+  preMessage: string,
+  baseMessage: string | null,
+  limit: number = DISCORD_MAX_MESSAGE_CHARS,
+): string {
+  if (preMessage.length > limit) {
+    return preMessage.slice(0, limit);
+  }
+  if (baseMessage === null) {
+    return preMessage;
+  }
+  const fullSuffix = REMINDS_ME_OF_SEPARATOR + baseMessage;
+  if (preMessage.length + fullSuffix.length <= limit) {
+    return preMessage + fullSuffix;
+  }
+  // Need to clip the suffix. Room available for the entire suffix line.
+  const room = limit - preMessage.length;
+  // No room for even the separator + clip marker — drop the suffix entirely.
+  if (room < REMINDS_ME_OF_SEPARATOR.length + SUFFIX_TRUNCATION_MARKER.length) {
+    return preMessage;
+  }
+  const clippedBase =
+    room - REMINDS_ME_OF_SEPARATOR.length - SUFFIX_TRUNCATION_MARKER.length;
+  return preMessage + REMINDS_ME_OF_SEPARATOR + baseMessage.slice(0, clippedBase) + SUFFIX_TRUNCATION_MARKER;
+}
+
 /**
  * The writer op (spec §3.1, loop-mode + poetic-closing spec §4.4). Hydrates from the
  * store, runs bootstrap, fetches every source, formats ONCE with a `LoopContext`,
@@ -166,9 +215,14 @@ export async function runFetch(params: RunFetchParams): Promise<RunFetchResult> 
   }
 
   // Step 9: build the final message. The suffix is built from past base_message
-  // (never past formatted_message), so the chain cannot snowball.
-  const finalMessage =
-    match !== null ? `${preMessage}\n\nReminds me of: ${match.baseMessage}` : preMessage;
+  // (never past formatted_message), so the chain cannot snowball. The result is
+  // bounded to Discord's 2000-character webhook cap via `buildFinalMessageForDiscord`
+  // — without that guard, an oversized preMessage or past baseMessage would cause
+  // Discord to reject the post before this tick's notification/embedding writes.
+  const finalMessage = buildFinalMessageForDiscord(
+    preMessage,
+    match === null ? null : match.baseMessage,
+  );
 
   // Step 10: post once.
   try {

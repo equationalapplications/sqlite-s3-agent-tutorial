@@ -124,6 +124,27 @@ describe('findNearestMatch', () => {
     cleanup(dir, db);
   });
 
+  it('returns null when the KNN window is filled with NULL rows even if a valid row exists further away', () => {
+    // Pins the post-filter contract: the SQL `WHERE n.base_message IS NOT NULL` filter
+    // runs after sqlite-vec's top-k scan, so a valid row that's outside the top-k window
+    // must NOT be returned — only the null filter's outcome (null) is the answer.
+    // KNN_CANDIDATES is 50 (see src/rag/similarity.ts); the test inserts 51 null rows
+    // so the top-50 window is entirely null rows, with the valid row at rank 52.
+    const { dir, db } = setup();
+    db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run();
+
+    for (let i = 0; i < 51; i += 1) {
+      const id = insertNotification(db, 'weather', `legacy ${i}`, 1000 + i, null);
+      insertEmbedding(db, id, unitVector(0)); // all 51 are tied at distance 0 from the query
+    }
+
+    const valid = insertNotification(db, 'weather', 'valid posted', 900, 'valid base');
+    insertEmbedding(db, valid, unitVector(50)); // far from unitVector(0), outside top-50
+
+    expect(findNearestMatch(db, unitVector(0))).toBeNull();
+    cleanup(dir, db);
+  });
+
   it('matches a recent (few-minutes-old) past notification — no age floor', () => {
     const { dir, db } = setup();
     db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run();

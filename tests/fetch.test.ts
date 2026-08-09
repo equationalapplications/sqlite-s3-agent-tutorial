@@ -11,6 +11,7 @@ import { createLocalEmbedder } from '../src/embed/local.js';
 import type { LoopContext } from '../src/format/types.js';
 import type { MessageFormatter } from '../src/format/types.js';
 import { runFetch } from '../src/agent/fetch.js';
+import { buildFinalMessageForDiscord } from '../src/agent/fetch.js';
 import { fakeSourceFetcher, throwingSourceFetcher } from './helpers/fakeSourceFetcher.js';
 import { fakeDiscordPoster } from './helpers/fakeDiscordPoster.js';
 import type { Embedder } from '../src/embed/titan.js';
@@ -109,7 +110,7 @@ describe('runFetch', () => {
     // we pin the LoopContext shape against.
     expect(formatter.calls).toHaveLength(2);
     const r2Ctx = formatter.calls[1];
-    expect(r2Ctx?.date).toBe('1970-01-01'); // epoch date — this stub doesn't override `now`
+    expect(r2Ctx?.date).toBe('1970-01-01'); // `now: () => 2000` is 2000ms after the epoch
     expect(r2Ctx?.location).toBe('Brooklyn');
     expect(r2Ctx?.readings.map((r) => ({ source: r.source, value: r.value }))).toEqual([
       { source: 'weather', value: '73F' },
@@ -629,5 +630,59 @@ describe('runFetch', () => {
     expect(runRow.error).toMatch(/PreconditionFailed/);
     reopened.close();
     ctx.cleanup();
+  });
+});
+
+describe('buildFinalMessageForDiscord', () => {
+  it('returns preMessage unchanged when there is no RAG match', () => {
+    const result = buildFinalMessageForDiscord('hello world', null);
+    expect(result).toBe('hello world');
+  });
+
+  it('appends the suffix verbatim when preMessage + suffix fits under 2000 chars', () => {
+    const preMessage = 'A short comment about today.';
+    const baseMessage = 'A past comment from yesterday.';
+    const result = buildFinalMessageForDiscord(preMessage, baseMessage);
+    expect(result).toBe(`${preMessage}\n\nReminds me of: ${baseMessage}`);
+    expect(result.length).toBeLessThanOrEqual(2000);
+  });
+
+  it('truncates the suffix with a clip marker when it would exceed 2000 chars', () => {
+    // preMessage consumes 1900 chars; suffix separator is 19 chars; baseMessage fills
+    // 200 chars, so the whole suffix is 219 chars and total would be 2119.
+    const preMessage = 'a'.repeat(1900);
+    const baseMessage = 'b'.repeat(200);
+    const result = buildFinalMessageForDiscord(preMessage, baseMessage);
+    expect(result.length).toBeLessThanOrEqual(2000);
+    expect(result.startsWith(preMessage)).toBe(true);
+    expect(result).toContain('Reminds me of: ');
+    expect(result.endsWith('...')).toBe(true);
+    // The baseMessage portion is clipped — not the whole 200 chars survive.
+    expect(result.length).toBeLessThan(preMessage.length + 19 + 200);
+  });
+
+  it('truncates preMessage itself when it alone exceeds 2000 chars, with no suffix', () => {
+    const preMessage = 'a'.repeat(3000);
+    const result = buildFinalMessageForDiscord(preMessage, 'a past message');
+    expect(result.length).toBe(2000);
+    expect(result).not.toContain('Reminds me of');
+  });
+
+  it('omits the suffix entirely when there is no room for even a clipped version', () => {
+    // preMessage leaves only 5 chars of headroom — separator (19) + clip marker (3) = 22,
+    // so the helper drops the suffix instead of producing a meaningless stub.
+    const preMessage = 'a'.repeat(1995);
+    const baseMessage = 'b'.repeat(200);
+    const result = buildFinalMessageForDiscord(preMessage, baseMessage);
+    expect(result).toBe(preMessage);
+  });
+
+  it('accepts a custom limit (used for the snowball regression test threshold of 500)', () => {
+    const preMessage = 'a'.repeat(400);
+    const baseMessage = 'b'.repeat(200);
+    const result = buildFinalMessageForDiscord(preMessage, baseMessage, 500);
+    expect(result.length).toBeLessThanOrEqual(500);
+    expect(result.startsWith(preMessage)).toBe(true);
+    expect(result.endsWith('...')).toBe(true);
   });
 });

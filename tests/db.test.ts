@@ -239,6 +239,14 @@ describe('bootstrap — nearest_match columns', () => {
     const colsAfter = db.prepare(`PRAGMA table_info(agent_notifications)`).all() as Array<{ name: string }>;
     expect(colsAfter.filter((c) => c.name === 'base_message')).toHaveLength(1);
 
+    // The legacy row (inserted with base_message = NULL above) must survive the
+    // second bootstrap unchanged — this pins data preservation, not only schema shape.
+    const legacy = db
+      .prepare(`SELECT base_message FROM agent_notifications`)
+      .all() as Array<{ base_message: string | null }>;
+    expect(legacy).toHaveLength(1);
+    expect(legacy[0]?.base_message).toBeNull();
+
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
