@@ -19,13 +19,20 @@ function cleanup(dir: string, db: Database.Database) {
   rmSync(dir, { recursive: true, force: true });
 }
 
-function insertNotification(db: Database.Database, source: string, formattedMessage: string, postedAt: number): number {
+function insertNotification(
+  db: Database.Database,
+  source: string,
+  formattedMessage: string,
+  postedAt: number,
+  baseMessage: string | null = formattedMessage,
+): number {
   const result = db
     .prepare(
-      `INSERT INTO agent_notifications (source, value, formatted_message, posted_at)
-       VALUES (?, 'v', ?, ?)`,
+      `INSERT INTO agent_notifications
+         (source, value, formatted_message, posted_at, base_message)
+       VALUES (?, 'v', ?, ?, ?)`,
     )
-    .run(source, formattedMessage, postedAt);
+    .run(source, formattedMessage, postedAt, baseMessage);
   return Number(result.lastInsertRowid);
 }
 
@@ -38,46 +45,99 @@ function unitVector(index: number): number[] {
 }
 
 describe('findNearestMatch', () => {
-  it('returns null when the source has no embedded history yet', () => {
+  it('returns null when there is no embedded history yet', () => {
     const { dir, db } = setup();
     db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run();
 
-    const result = findNearestMatch(db, 'weather', unitVector(0));
-    expect(result).toBeNull();
+    expect(findNearestMatch(db, unitVector(0))).toBeNull();
     cleanup(dir, db);
   });
 
-  it('returns the closest same-source notification by cosine distance', () => {
+  it('returns the closest notification (global, no per-source filter) and exposes baseMessage', () => {
     const { dir, db } = setup();
     db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run();
 
-    const closeId = insertNotification(db, 'weather', 'close message', 1000);
+    const closeId = insertNotification(db, 'weather', 'close message', 1000, 'close base');
     insertEmbedding(db, closeId, unitVector(0));
 
-    const farId = insertNotification(db, 'weather', 'far message', 2000);
+    const farId = insertNotification(db, 'weather', 'far message', 2000, 'far base');
     insertEmbedding(db, farId, unitVector(1));
 
-    const match = findNearestMatch(db, 'weather', unitVector(0));
+    const match = findNearestMatch(db, unitVector(0));
     expect(match).not.toBeNull();
     expect(match?.notificationId).toBe(closeId);
-    expect(match?.formattedMessage).toBe('close message');
+    expect(match?.baseMessage).toBe('close base');
     expect(match?.postedAt).toBe(1000);
-    expect(match?.distance).toBeLessThan(0.01); // near-identical vector, near-zero distance
+    expect(match?.distance).toBeLessThan(0.01);
     cleanup(dir, db);
   });
 
-  it('filters to the requested source even when another source has a closer vector', () => {
+  it('matches across sources (no per-source filter) — KNN is global', () => {
     const { dir, db } = setup();
     db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather'), ('crypto')`).run();
 
-    const cryptoId = insertNotification(db, 'crypto', 'crypto message', 1000);
-    insertEmbedding(db, cryptoId, unitVector(0)); // exact match for the query vector below
+    const cryptoId = insertNotification(db, 'crypto', 'crypto base', 1000, 'crypto base');
+    insertEmbedding(db, cryptoId, unitVector(0));
 
-    const weatherId = insertNotification(db, 'weather', 'weather message', 2000);
-    insertEmbedding(db, weatherId, unitVector(5)); // far from the query vector
+    const weatherId = insertNotification(db, 'weather', 'weather base', 2000, 'weather base');
+    insertEmbedding(db, weatherId, unitVector(5));
 
-    const match = findNearestMatch(db, 'weather', unitVector(0));
-    expect(match?.notificationId).toBe(weatherId); // not cryptoId, despite being the closer vector
+    const match = findNearestMatch(db, unitVector(0));
+    expect(match?.notificationId).toBe(cryptoId); // crypto is closer than weather
+    expect(match?.baseMessage).toBe('crypto base');
+    cleanup(dir, db);
+  });
+
+  it('excludes rows whose base_message is NULL (legacy rows post-migration)', () => {
+    const { dir, db } = setup();
+    db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather'), ('crypto')`).run();
+
+    // Three legacy rows with base_message = NULL, vectors spanning the search space.
+    // The closest vector candidate should be a CRYPTO row with NULL base_message —
+    // a non-null row elsewhere must still be returned if present.
+    const legacyCrypto = insertNotification(db, 'crypto', 'legacy crypto', 1000, null);
+    insertEmbedding(db, legacyCrypto, unitVector(0)); // closest to the query below
+
+    const legacyWeather = insertNotification(db, 'weather', 'legacy weather', 1100, null);
+    insertEmbedding(db, legacyWeather, unitVector(1));
+
+    const valid = insertNotification(db, 'weather', 'valid posted', 900, 'valid base');
+    insertEmbedding(db, valid, unitVector(10)); // far from unitVector(0) but non-null base_message
+
+    const match = findNearestMatch(db, unitVector(0));
+    expect(match?.notificationId).toBe(valid);
+    expect(match?.baseMessage).toBe('valid base');
+    cleanup(dir, db);
+  });
+
+  it('returns null when every candidate has base_message = NULL', () => {
+    const { dir, db } = setup();
+    db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather'), ('crypto')`).run();
+
+    const legacy1 = insertNotification(db, 'weather', 'legacy', 1000, null);
+    insertEmbedding(db, legacy1, unitVector(0));
+
+    const legacy2 = insertNotification(db, 'crypto', 'legacy', 1100, null);
+    insertEmbedding(db, legacy2, unitVector(1));
+
+    expect(findNearestMatch(db, unitVector(0))).toBeNull();
+    cleanup(dir, db);
+  });
+
+  it('matches a recent (few-minutes-old) past notification — no age floor', () => {
+    const { dir, db } = setup();
+    db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run();
+
+    // Reference tick: 5 minutes ago.
+    const recent = insertNotification(db, 'weather', 'recent posted', 1000, 'recent base');
+    insertEmbedding(db, recent, unitVector(0));
+
+    // Query "now" (no time gap engineered in): the function takes no timestamp,
+    // so any match from the corpus is valid — the no-age-floor decision is
+    // pinned by the absence of a timestamp filter, not by an explicit one.
+    const match = findNearestMatch(db, unitVector(0));
+    expect(match?.notificationId).toBe(recent);
+    expect(match?.baseMessage).toBe('recent base');
     cleanup(dir, db);
   });
 });
@@ -86,12 +146,13 @@ describe('insertEmbedding', () => {
   it('stores a vector retrievable by a later findNearestMatch call', () => {
     const { dir, db } = setup();
     db.prepare(`INSERT INTO agent_sources (name) VALUES ('weather')`).run();
-    const id = insertNotification(db, 'weather', 'stored message', 1000);
+    const id = insertNotification(db, 'weather', 'stored message', 1000, 'stored base');
 
     expect(() => insertEmbedding(db, id, unitVector(3))).not.toThrow();
 
-    const match = findNearestMatch(db, 'weather', unitVector(3));
+    const match = findNearestMatch(db, unitVector(3));
     expect(match?.notificationId).toBe(id);
+    expect(match?.baseMessage).toBe('stored base');
     cleanup(dir, db);
   });
 });
