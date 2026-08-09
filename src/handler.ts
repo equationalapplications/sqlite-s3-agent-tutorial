@@ -2,6 +2,7 @@
 import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { S3Client } from '@aws-sdk/client-s3';
 import { runFetch } from './agent/fetch.js';
+import { createStatusReader, type StatusReader } from './agent/status.js';
 import { loadConfig } from './config.js';
 import { createFetchDiscordPoster } from './discord/poster.js';
 import { createBedrockFormatter } from './format/bedrock.js';
@@ -27,6 +28,35 @@ export interface LambdaResult {
 export interface InjectedClients {
   s3Client?: S3Client;
   bedrockClient?: BedrockRuntimeClient;
+}
+
+/**
+ * Module-scope, keyed by the reader's local path: the Lambda runtime may reuse the
+ * container across invocations, so the reader's hydration cache (spec §4.3) must
+ * survive warm invocations — recreating it per call would re-download the snapshot on
+ * every request regardless of whether its ETag changed.
+ */
+const statusReaders = new Map<string, StatusReader>();
+
+/**
+ * Returns a `StatusReader` whose local SQLite file is a sibling of the writer's, not
+ * the writer's file itself. The writer (`runFetch`) writes to `config.dbPath` on every
+ * invocation, including the conditional-write failure path where the S3 PutObject is
+ * rejected with 412 — in that case the local file is still mutated to record the
+ * `outcome='error'` run row, but S3's ETag is unchanged. If the reader shared the
+ * writer's path, a subsequent warm `status` call would see an ETag cache hit and
+ * answer from the still-open reader handle against the writer's mutated bytes.
+ * Keeping the two paths disjoint means the reader's local copy only changes when the
+ * reader itself downloads a new snapshot.
+ */
+function getStatusReader(writerDbPath: string): StatusReader {
+  const readerDbPath = `${writerDbPath}.reader`;
+  let reader = statusReaders.get(readerDbPath);
+  if (reader === undefined) {
+    reader = createStatusReader(readerDbPath);
+    statusReaders.set(readerDbPath, reader);
+  }
+  return reader;
 }
 
 /**
@@ -74,8 +104,11 @@ export async function runHandler(
   const config = loadConfig(env);
 
   if (op === 'status') {
-    // PR3 implements the reader op (spec §9 Phase 4).
-    return { statusCode: 501, body: JSON.stringify({ error: 'status op not yet implemented' }) };
+    const s3Client = clients.s3Client ?? new S3Client({ region: config.region, maxAttempts: 3 });
+    const store = createS3Store({ client: s3Client, bucket: config.snapshotBucket });
+    const reader = getStatusReader(config.dbPath);
+    const result = await reader.getStatus(store, config.snapshotKey);
+    return { statusCode: 200, body: JSON.stringify(result) };
   }
 
   const s3Client = clients.s3Client ?? new S3Client({ region: config.region, maxAttempts: 3 });

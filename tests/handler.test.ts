@@ -1,6 +1,7 @@
 // tests/handler.test.ts
 import {
   GetObjectCommand,
+  HeadObjectCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -57,15 +58,34 @@ describe('runHandler', () => {
     expect(body.outcome).toBe('success');
   });
 
-  it('routes op="status" to a 501 stub (PR3 completes this op)', async () => {
+  it('routes op="status" through the reader and returns 200 with the empty-state shape when no snapshot exists', async () => {
+    s3.on(GetObjectCommand).rejects({ name: 'NoSuchKey' });
+    s3.on(PutObjectCommand).resolves({ ETag: '"v1"' });
+    bedrock.on(ConverseCommand).resolves({
+      output: { message: { role: 'assistant', content: [{ text: 'Weather update: 72F' }] } },
+      stopReason: 'end_turn',
+    });
+
     const env = {
       DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
       SNAPSHOT_BUCKET: 'test-bucket',
       DB_PATH: join(dir, 'memory.db'),
+      SOURCES: '["weather"]',
     };
+    const clients = { s3Client: s3 as unknown as S3Client, bedrockClient: bedrock as unknown as BedrockRuntimeClient };
 
-    const result = await runHandler({ op: 'status' }, env);
-    expect(result.statusCode).toBe(501);
+    // Publish a snapshot via fetch first, then read it via status. The S3 mock is
+    // stateless across commands, so this test only checks the routing and response shape,
+    // not that fetch's write is visible to a fresh S3 GET — status.test.ts already covers
+    // the version-cache hydration logic against a real LocalStore.
+    await runHandler({ op: 'fetch' }, env, clients, { weather: async () => '72F' });
+
+    s3.on(HeadObjectCommand).rejects({ name: 'NotFound' });
+    const result = await runHandler({ op: 'status' }, env, clients);
+
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body ?? '{}');
+    expect(body).toEqual({ snapshotVersion: null, sources: [], recentNotifications: [] });
   });
 
   it('returns 400 for an unknown op', async () => {
@@ -83,6 +103,7 @@ describe('runHandler', () => {
     // a hostile Function URL client posting `{op: 42}` or `{op: {name: 'fetch'}}`
     // would otherwise undermine the typed string contract. Falling through to the
     // body (or to the 400 path) keeps behaviour predictable.
+    s3.on(HeadObjectCommand).rejects({ name: 'NotFound' });
     const env = {
       DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
       SNAPSHOT_BUCKET: 'test-bucket',
@@ -93,7 +114,9 @@ describe('runHandler', () => {
       { op: 42 as any, body: '{"op":"status"}' },
       env,
     );
-    expect(result.statusCode).toBe(501); // status op (parsed from body)
+    expect(result.statusCode).toBe(200); // status op (parsed from body)
+    const body = JSON.parse(result.body ?? '{}');
+    expect(body).toEqual({ snapshotVersion: null, sources: [], recentNotifications: [] });
   });
 
   it('returns 400 when event.op is a non-string and the body is empty', async () => {
@@ -108,6 +131,7 @@ describe('runHandler', () => {
   });
 
   it('parses op from event.body when called via a Function URL invocation', async () => {
+    s3.on(HeadObjectCommand).rejects({ name: 'NotFound' });
     const env = {
       DISCORD_WEBHOOK_URL: 'https://discord.example/webhook',
       SNAPSHOT_BUCKET: 'test-bucket',
@@ -115,7 +139,9 @@ describe('runHandler', () => {
 
     // Lambda Function URLs deliver the HTTP request body as a string under `event.body`.
     const result = await runHandler({ body: '{"op":"status"}' }, env);
-    expect(result.statusCode).toBe(501);
+    expect(result.statusCode).toBe(200);
+    const body = JSON.parse(result.body ?? '{}');
+    expect(body).toEqual({ snapshotVersion: null, sources: [], recentNotifications: [] });
   });
 
   it('returns 400 when the Function URL body is not valid JSON', async () => {

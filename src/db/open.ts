@@ -19,3 +19,12 @@ export function openDatabase(path: string): Database.Database {
   db.pragma('foreign_keys = ON');
   return db;
 }
+
+/**
+ * Opens an existing SQLite file read-only. Used by the reader (spec §3.2): the reader's
+ * IAM grant is GetObject-only (spec §2), so a read-only DB handle matches that intent even
+ * though `better-sqlite3` itself has no knowledge of the S3 permission model.
+ */
+export function openReadOnlyDatabase(path: string): Database.Database {
+  return new Database(path, { readonly: true });
+}

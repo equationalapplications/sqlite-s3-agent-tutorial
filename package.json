@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "local-fetch": "tsx src/localFetch.ts",
     "cdk": "cdk",
-    "deploy": "bash scripts/deploy.sh"
+    "deploy": "bash scripts/deploy.sh",
+    "smoke": "bash scripts/smoke.sh"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.1",
