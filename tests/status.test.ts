@@ -2,7 +2,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { bootstrap } from '../src/db/bootstrap.js';
 import { openDatabase } from '../src/db/open.js';
 import { createLocalStore } from '../src/store/local.js';
@@ -12,7 +12,7 @@ function setup() {
   const dir = mkdtempSync(join(tmpdir(), 'agent-status-test-'));
   const dbPath = join(dir, 'memory.db');
   const store = createLocalStore(join(dir, 'store'));
-  return { dir, dbPath, store, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return { dir, dbPath, store };
 }
 
 async function seedSnapshot(dbPath: string, store: ReturnType<typeof createLocalStore>) {
@@ -37,12 +37,19 @@ describe('createStatusReader', () => {
     ctx = setup();
   });
 
+  // afterEach rather than per-test cleanup calls: a failing assertion earlier in the
+  // body would otherwise leak the temp dir, which can bleed into the next test and
+  // makes failures harder to reproduce. `force: true` keeps this a no-op if the dir was
+  // already cleaned up by some other path.
+  afterEach(() => {
+    rmSync(ctx.dir, { recursive: true, force: true });
+  });
+
   it('returns the empty-state JSON when no snapshot exists yet, without opening a handle', async () => {
     const reader = createStatusReader(ctx.dbPath);
     const result = await reader.getStatus(ctx.store, 'memory.db');
 
     expect(result).toEqual({ snapshotVersion: null, sources: [], recentNotifications: [] });
-    ctx.cleanup();
   });
 
   it('downloads and returns sources + recentNotifications on first call', async () => {
@@ -60,7 +67,6 @@ describe('createStatusReader', () => {
     expect(result.recentNotifications).toEqual([
       { source: 'weather', value: '72F', formattedMessage: 'Looks like 72F today!', postedAt: 1000 },
     ]);
-    ctx.cleanup();
   });
 
   it('reuses the cached handle on a second call when the version is unchanged (no re-download)', async () => {
@@ -82,7 +88,6 @@ describe('createStatusReader', () => {
     const second = await reader.getStatus(countingStore, 'memory.db');
     expect(getCalls).toBe(0); // head-only, no re-download
     expect(second.sources).toHaveLength(1);
-    ctx.cleanup();
   });
 
   it('re-downloads and re-opens when the version changes', async () => {
@@ -107,6 +112,5 @@ describe('createStatusReader', () => {
     expect(second.sources).toEqual([
       { name: 'weather', lastValue: '73F', lastFetchedAt: 2000, lastPostedAt: 2000 },
     ]);
-    ctx.cleanup();
   });
 });

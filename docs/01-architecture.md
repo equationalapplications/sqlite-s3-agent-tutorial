@@ -1,10 +1,12 @@
 # Architecture
 
 One Lambda function. Two operations, read as `event.op`: `fetch` (the writer, run daily by
-EventBridge) and `status` (the reader, exposed by a Function URL). Both share a single
-SQLite file that lives durably in one S3 object and transiently in `/tmp` for the
-lifetime of the execution environment. Warm Lambda invocations share that `/tmp`, which
-is exactly what lets the status reader reuse its cached database handle (see
+EventBridge) and `status` (the reader, exposed by a Function URL). Both read and write the
+same single SQLite file that lives durably in one S3 object, but each keeps its own
+transient copy in `/tmp` for the lifetime of the execution environment: the writer at
+`${DB_PATH}` (default `/tmp/memory.db`), the reader at `${DB_PATH}.reader` (default
+`/tmp/memory.db.reader`). Warm Lambda invocations share that `/tmp`, which is exactly what
+lets the status reader reuse its cached database handle (see
 [docs/02-rehydration.md](02-rehydration.md)); cold starts discard it and rehydrate from S3.
 
 ## Why one file in S3 instead of a database server

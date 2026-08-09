@@ -31,18 +31,30 @@ export interface InjectedClients {
 }
 
 /**
- * Module-scope, keyed by dbPath: the Lambda runtime may reuse the container across
- * invocations, so the reader's hydration cache (spec §4.3) must survive warm
- * invocations — recreating it per call would re-download the snapshot on every request
- * regardless of whether its ETag changed.
+ * Module-scope, keyed by the reader's local path: the Lambda runtime may reuse the
+ * container across invocations, so the reader's hydration cache (spec §4.3) must
+ * survive warm invocations — recreating it per call would re-download the snapshot on
+ * every request regardless of whether its ETag changed.
  */
 const statusReaders = new Map<string, StatusReader>();
 
-function getStatusReader(dbPath: string): StatusReader {
-  let reader = statusReaders.get(dbPath);
+/**
+ * Returns a `StatusReader` whose local SQLite file is a sibling of the writer's, not
+ * the writer's file itself. The writer (`runFetch`) writes to `config.dbPath` on every
+ * invocation, including the conditional-write failure path where the S3 PutObject is
+ * rejected with 412 — in that case the local file is still mutated to record the
+ * `outcome='error'` run row, but S3's ETag is unchanged. If the reader shared the
+ * writer's path, a subsequent warm `status` call would see an ETag cache hit and
+ * answer from the still-open reader handle against the writer's mutated bytes.
+ * Keeping the two paths disjoint means the reader's local copy only changes when the
+ * reader itself downloads a new snapshot.
+ */
+function getStatusReader(writerDbPath: string): StatusReader {
+  const readerDbPath = `${writerDbPath}.reader`;
+  let reader = statusReaders.get(readerDbPath);
   if (reader === undefined) {
-    reader = createStatusReader(dbPath);
-    statusReaders.set(dbPath, reader);
+    reader = createStatusReader(readerDbPath);
+    statusReaders.set(readerDbPath, reader);
   }
   return reader;
 }

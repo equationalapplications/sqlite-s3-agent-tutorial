@@ -102,9 +102,10 @@ export function createStatusReader(dbPath: string): StatusReader {
           state.db.close();
           state.db = undefined;
         }
-        if (existsSync(dbPath)) {
-          rmSync(dbPath);
-        }
+        // `force: true` makes the delete robust against the file disappearing between the
+        // existsSync check and the rmSync call — `/tmp` is shared with the writer, and
+        // `/tmp` cleanup can race us too. With `force` the no-op case is harmless.
+        rmSync(dbPath, { force: true });
 
         const object = await store.get(storeKey);
         if (object === null) {

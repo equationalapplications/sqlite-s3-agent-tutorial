@@ -76,7 +76,7 @@ One Lambda function, two ops, one S3 bucket, one SQLite file.
 
 **LLM message formatting.** Between the value fetch and the Discord post, the writer calls Amazon Bedrock (default `zai.glm-4.7-flash`) to turn the raw value into a friendly message. Dedup runs on the raw `value` *before* the LLM call (§3.1 step 3), so unchanged values never invoke Bedrock — the model is paid for only when there's actually something new to say. The model choice is overridable per environment via `bedrockModelId` (§11). The same `MessageFormatter` interface is implemented by `LocalTemplateFormatter` (Phase 1, no AWS) and `BedrockFormatter` (Phase 3, default), so the writer's hot path doesn't change between local and deployed.
 
-**`fetch` is the writer; `status` is the reader.** Both share `/tmp/memory.db`. The reader's job is to make the writer's state visible — without it, the only way to inspect the bot is `aws s3 cp` and `sqlite3`, which is bad tutorial UX. The reader is a JSON endpoint, not a UI: callers (`curl`, `aws lambda invoke`, browser address bar) see `sources[]` and `recentNotifications[]`, not a dashboard.
+**`fetch` is the writer; `status` is the reader.** Both read and write the same single S3 object, but each keeps its own local copy under `/tmp`: the writer at `${DB_PATH}` (default `/tmp/memory.db`), the reader at `${DB_PATH}.reader` (default `/tmp/memory.db.reader`). The split matters because the writer mutates its local file on every invocation, including the conditional-write failure path where S3 rejects the PUT with 412 and the writer records the `outcome='error'` run row locally — the S3 ETag does not change in that branch, so a reader sharing the writer's path would see an ETag cache hit and answer from the still-open reader handle against the writer's mutated bytes. Keeping the two local paths disjoint means the reader's local copy only changes when the reader itself downloads a new snapshot. The reader's job is to make the writer's state visible — without it, the only way to inspect the bot is `aws s3 cp` and `sqlite3`, which is bad tutorial UX. The reader is a JSON endpoint, not a UI: callers (`curl`, `aws lambda invoke`, browser address bar) see `sources[]` and `recentNotifications[]`, not a dashboard.
 
 **Single-writer invariant.** The function has `reservedConcurrency: 1`. Without it, two simultaneous `fetch` invocations could both hydrate the same version, both upload, and silently overwrite each other's writes. The `status` op is read-only by IAM (`s3:GetObject` only, no `s3:PutObject`), so the writer's state is safe even though it shares the role.
 
@@ -113,9 +113,9 @@ One Lambda function, two ops, one S3 bucket, one SQLite file.
 
 ```
 1.  HEAD on s3://<bucket>/memory.db; capture ETag
-2.  If module-scope cached ETag equals current and /tmp/memory.db exists:
+2.  If module-scope cached ETag equals current and /tmp/memory.db.reader exists:
     reuse, open read-only handle
-3.  Else: close any open handle, rm /tmp/memory.db, GetObject → /tmp/memory.db,
+3.  Else: close any open handle, rm /tmp/memory.db.reader, GetObject → /tmp/memory.db.reader,
    cache ETag, open read-only handle
 4.  Query: SELECT name, last_value, last_fetched_at, last_posted_at FROM agent_sources
            + last N rows from agent_notifications JOIN agent_sources
@@ -153,8 +153,10 @@ The writer calls `Store.put(key, body, ifMatch)`. The `ifMatch` argument is the 
 The reader keeps the last hydrated ETag in module scope. Each invocation:
 
 1. `HEAD s3://<bucket>/memory.db`. Capture current ETag.
-2. If module-scope ETag equals current ETag and `/tmp/memory.db` exists: open a read-only handle to the existing file.
-3. Else: close any open handle, `rm /tmp/memory.db`, `GetObject` → `/tmp/memory.db`, open a read-only handle, update module-scope ETag. **If `GetObject` returns `NoSuchKey`** (no snapshot yet — `fetch` has never run successfully), return the empty-state JSON — `{ snapshotVersion: null, sources: [], recentNotifications: [] }` — without opening a handle. There is nothing to query until the writer has produced at least one snapshot.
+2. If module-scope ETag equals current ETag and `/tmp/memory.db.reader` exists: open a read-only handle to the existing file.
+3. Else: close any open handle, `rm /tmp/memory.db.reader`, `GetObject` → `/tmp/memory.db.reader`, open a read-only handle, update module-scope ETag. **If `GetObject` returns `NoSuchKey`** (no snapshot yet — `fetch` has never run successfully), return the empty-state JSON — `{ snapshotVersion: null, sources: [], recentNotifications: [] }` — without opening a handle. There is nothing to query until the writer has produced at least one snapshot.
+
+**Why a separate local path from the writer's.** The writer mutates its local copy on every invocation — including the conditional-write failure path, where a 412 from S3 leaves the writer's local file with the `outcome='error'` run row recorded but S3's ETag unchanged. If the reader shared the writer's local path, the reader's ETag cache hit would answer from the still-open reader handle against those locally-mutated bytes, even though the authoritative S3 snapshot did not change. Disjoint local paths keep the reader's view strictly in step with what the writer has actually published.
 
 **Why close-and-reopen rather than reuse the open handle?** `better-sqlite3` keeps a page cache in memory. If the file on disk changes underneath an open handle, the cache describes a file that no longer exists — silently wrong answers, no error. The mechanism is the same one `aws-cloud-agent` uses for the same reason.
 
