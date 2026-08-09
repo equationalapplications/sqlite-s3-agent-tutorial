@@ -72,10 +72,15 @@ describe('schema DDL', () => {
       .run().lastInsertRowid as number;
 
     const vector = JSON.stringify(new Array(256).fill(0.1));
+    // notification_id must be bound as a BigInt: better-sqlite3 binding a plain JS
+    // number as the primary key of a vec0 virtual table's INSERT trips sqlite-vec's
+    // "Only integers are allowed for primary key values" check, even though the same
+    // number works fine as a rowid on an ordinary table (verified against installed
+    // sqlite-vec v0.1.9 + better-sqlite3 v13 before writing this).
     expect(() =>
       db
         .prepare(`INSERT INTO agent_embeddings (notification_id, embedding) VALUES (?, vec_f32(?))`)
-        .run(notificationId, vector),
+        .run(BigInt(notificationId), vector),
     ).not.toThrow();
 
     const row = db.prepare(`SELECT notification_id FROM agent_embeddings`).get() as { notification_id: number };
@@ -138,6 +143,19 @@ describe('openDatabase', () => {
         )
         .run('weather', '72F', 'Weather update: 72F', 1000),
     ).toThrow(/FOREIGN KEY constraint failed/);
+
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('loads the sqlite-vec extension so vec0 tables can be created', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-test-'));
+    const path = join(dir, 'memory.db');
+
+    const db = openDatabase(path);
+    expect(() =>
+      db.exec(`CREATE VIRTUAL TABLE probe_vec USING vec0(embedding FLOAT[4])`),
+    ).not.toThrow();
 
     db.close();
     rmSync(dir, { recursive: true, force: true });

@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
 
 /**
  * Opens a file-backed SQLite database.
@@ -11,9 +12,18 @@ import Database from 'better-sqlite3';
  * `agent_notifications.source`'s `FOREIGN KEY ... ON DELETE CASCADE` is a no-op, and the
  * writer could insert orphan notification rows for sources that don't exist in
  * `agent_sources`.
+ *
+ * Loads the `sqlite-vec` extension (RAG design spec §5) — `bootstrap()`'s DDL includes a
+ * `vec0` virtual table, which requires the extension to already be registered on this
+ * connection. `better-sqlite3`'s `loadExtension` needs no constructor flag (unlike Node's
+ * built-in `node:sqlite`, which does) — this was verified against the installed
+ * `better-sqlite3` version before writing this. The reader (`openReadOnlyDatabase`,
+ * below) deliberately does *not* load this extension: it never runs vector queries, only
+ * plain-column reads.
  */
 export function openDatabase(path: string): Database.Database {
   const db = new Database(path);
+  sqliteVec.load(db);
   db.pragma('journal_mode = DELETE');
   db.pragma('synchronous = FULL');
   db.pragma('foreign_keys = ON');
