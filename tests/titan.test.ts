@@ -23,13 +23,15 @@ describe('createTitanEmbedder', () => {
   afterEach(() => bedrock.reset());
 
   const client = new BedrockRuntimeClient({ region: 'us-east-1' });
+  const vector256 = Array.from({ length: 256 }, (_, i) => i / 256);
+  const otherVector256 = Array.from({ length: 256 }, (_, i) => (i + 1) / 256);
 
   it('calls InvokeModel with the Titan v2 model id, 256 dims, normalize, and returns the embedding', async () => {
-    bedrock.on(InvokeModelCommand).resolves(embeddingResponse([0.1, 0.2, 0.3]));
+    bedrock.on(InvokeModelCommand).resolves(embeddingResponse(vector256));
 
     const embedder = createTitanEmbedder({ client, region: 'us-east-1' });
     const vector = await embedder.embed('72F');
-    expect(vector).toEqual([0.1, 0.2, 0.3]);
+    expect(vector).toEqual(vector256);
 
     const calls = bedrock.commandCalls(InvokeModelCommand);
     expect(calls[0]?.args[0].input?.modelId).toBe('amazon.titan-embed-text-v2:0');
@@ -48,11 +50,11 @@ describe('createTitanEmbedder', () => {
     bedrock
       .on(InvokeModelCommand)
       .rejectsOnce({ name: 'ThrottlingException', message: 'slow down' })
-      .resolves(embeddingResponse([1, 2, 3]));
+      .resolves(embeddingResponse(otherVector256));
 
     const embedder = createTitanEmbedder({ client, region: 'us-east-1' });
     const vector = await embedder.embed('72F');
-    expect(vector).toEqual([1, 2, 3]);
+    expect(vector).toEqual(otherVector256);
     expect(bedrock.commandCalls(InvokeModelCommand)).toHaveLength(2);
   });
 
@@ -69,6 +71,24 @@ describe('createTitanEmbedder', () => {
       body: Uint8ArrayBlobAdapter.mutate(new TextEncoder().encode(JSON.stringify({ inputTextTokenCount: 5 }))),
       contentType: 'application/json',
     });
+
+    const embedder = createTitanEmbedder({ client, region: 'us-east-1' });
+    await expect(embedder.embed('72F')).rejects.toThrow(/no embedding/i);
+    expect(bedrock.commandCalls(InvokeModelCommand)).toHaveLength(1);
+  });
+
+  it('throws on a response with the wrong embedding length, no retry', async () => {
+    bedrock.on(InvokeModelCommand).resolves(embeddingResponse([0.1, 0.2, 0.3]));
+
+    const embedder = createTitanEmbedder({ client, region: 'us-east-1' });
+    await expect(embedder.embed('72F')).rejects.toThrow(/no embedding/i);
+    expect(bedrock.commandCalls(InvokeModelCommand)).toHaveLength(1);
+  });
+
+  it('throws on a response with a non-finite entry, no retry', async () => {
+    const badVector = [...vector256];
+    badVector[0] = Number.NaN;
+    bedrock.on(InvokeModelCommand).resolves(embeddingResponse(badVector));
 
     const embedder = createTitanEmbedder({ client, region: 'us-east-1' });
     await expect(embedder.embed('72F')).rejects.toThrow(/no embedding/i);

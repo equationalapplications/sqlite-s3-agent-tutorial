@@ -43,11 +43,12 @@ protects against an out-of-band `aws s3 cp` — belt and suspenders.
 
 ## Bedrock calls: formatting and embedding
 
-Between the value fetch and the Discord post, the writer calls Amazon Bedrock's Converse
-API to turn the raw value into a friendly message, and a second, smaller Bedrock round
-trip — Titan Text Embeddings V2, via `InvokeModel` rather than `Converse` — embeds each
-posted notification into a `sqlite-vec` table inside the same `memory.db` file, so the
-writer can mention the closest same-source past result in the prompt above; see
+Before formatting, the writer makes a small Bedrock round trip — Titan Text Embeddings
+V2, via `InvokeModel` rather than `Converse` — to embed the raw fetched value and search
+a `sqlite-vec` table inside the same `memory.db` file for the closest same-source past
+notification, so the formatter can fold that match into its prompt. Only after the
+formatted message is posted to Discord does the writer embed and store *that* posted
+notification, via the same Titan call, for future lookups; see
 [docs/08-rag-vector-search.md](08-rag-vector-search.md).
 
 ## EventBridge's payload

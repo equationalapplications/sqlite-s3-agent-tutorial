@@ -77,7 +77,11 @@ export function createTitanEmbedder(options: TitanEmbedderOptions): Embedder {
 
     const decoded = new TextDecoder().decode(response.body);
     const parsed = JSON.parse(decoded) as { embedding?: unknown };
-    if (!Array.isArray(parsed.embedding) || parsed.embedding.length === 0) {
+    if (
+      !Array.isArray(parsed.embedding) ||
+      parsed.embedding.length !== DIMENSIONS ||
+      !parsed.embedding.every((value) => typeof value === 'number' && Number.isFinite(value))
+    ) {
       throw new Error(`Titan returned no embedding for model "${MODEL_ID}"`);
     }
     return parsed.embedding as number[];
