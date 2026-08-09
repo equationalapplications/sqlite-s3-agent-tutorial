@@ -63,6 +63,31 @@ happens if you just overwrite `/tmp/memory.db` without closing first — the han
 cache goes stale silently. Queries keep succeeding; they just return wrong answers. Closing
 first is what prevents that.
 
+## 4. `/tmp` storage ceiling
+
+The hydration pattern depends on a local file at `/tmp/memory.db`, which lives on
+Lambda's ephemeral local storage — not on S3 and not on any volume that persists across
+invocations. That storage has a hard ceiling:
+
+- **Default:** 512 MB. `/tmp` is provisioned at this size unless you override it.
+- **AWS maximum:** 10,240 MB (10 GB), set via the `ephemeralStorage` prop on
+  `aws-cdk-lib/aws-lambda`'s `DockerImageFunction`. `infra/stack.ts` does not override
+  the default, so a fresh deploy runs at 512 MB.
+
+A snapshot row plus its embedding is roughly 4 KB on disk. 512 MB holds about 131,000
+ticks' worth of rows — enough that the file still fits in `/tmp` after about 450 days
+of running the 5-minute loop (`npm run loop-start`, 288 ticks/day — see the README's Loop
+mode section). Past that, `s3.GetObject` fails with `No space left on device` on the
+next hydrate and the writer publishes nothing until a redeploy resurfaces a fresh
+container with an empty `/tmp`.
+
+If you intend to leave the loop running unattended for longer than that, set
+`ephemeralStorage: Size.gibibytes(10)` on `agentFunction` in `infra/stack.ts` and
+redeploy. At the AWS cap the same math gives roughly 2.6 million ticks of headroom —
+about 25 years at 5-minute cadence. The RAG corpus (`agent_notifications` +
+`agent_embeddings`) is the dominant growth term; status reads and `agent_runs` rows are
+small by comparison.
+
 ## Bedrock setup
 
 Before the first `fetch` invocation can succeed, the deploying account in `us-east-1` needs
