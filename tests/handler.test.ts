@@ -277,7 +277,7 @@ describe('runHandler', () => {
       // this so a regression that fans the embed out per source fails loudly. Without
       // this assertion, the InvokeModelCommand stub in beforeEach would silently absorb
       // any number of calls and the test would still pass.
-      expect(bedrock.commandCalls(InvokeModelCommand).length).toBeGreaterThanOrEqual(1);
+      expect(bedrock.commandCalls(InvokeModelCommand)).toHaveLength(1);
       // And the Discord poster must actually post exactly once — without asserting this,
       // a swallowed fetch failure (the real fetch is spied in beforeEach) would let
       // runFetch catch the error and return success.

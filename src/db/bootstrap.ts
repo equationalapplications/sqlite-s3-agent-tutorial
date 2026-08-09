@@ -18,8 +18,8 @@ export function bootstrap(db: Database.Database): void {
  *   pre-suffix output (the friendly comment + haiku). The RAG corpus embeds this
  *   column, and `findNearestMatch` returns it for the "Reminds me of" suffix —
  *   never the posted `formatted_message` — so the suffix cannot snowball.
- *   Nullable so legacy rows post-migration carry `NULL` and the LIKE exclusion
- *   in `findNearestMatch` keeps them out of match candidacy.
+ *   Nullable so legacy rows post-migration carry `NULL` and the `IS NOT NULL`
+ *   filter in `findNearestMatch` keeps them out of match candidacy.
  */
 function addMissingColumns(db: Database.Database): void {
   const columns = db.prepare(`PRAGMA table_info(agent_notifications)`).all() as Array<{ name: string }>;

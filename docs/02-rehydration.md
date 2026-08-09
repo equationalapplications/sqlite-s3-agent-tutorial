@@ -77,9 +77,10 @@ invocations. That storage has a hard ceiling:
 A snapshot row plus its embedding is roughly 4 KB on disk. 512 MB holds about 131,000
 ticks' worth of rows — enough that the file still fits in `/tmp` after about 450 days
 of running the 5-minute loop (`npm run loop-start`, 288 ticks/day — see the README's Loop
-mode section). Past that, `s3.GetObject` fails with `No space left on device` on the
-next hydrate and the writer publishes nothing until a redeploy resurfaces a fresh
-container with an empty `/tmp`.
+mode section). Past that, the writer's local `writeFileSync` of the hydrated snapshot
+to `/tmp/memory.db` fails with `ENOSPC: no space left on device` (the S3 `GetObject`
+itself succeeds — the bytes are in memory by then), and the writer publishes nothing
+until a redeploy resurfaces a fresh container with an empty `/tmp`.
 
 If you intend to leave the loop running unattended for longer than that, set
 `ephemeralStorage: Size.gibibytes(10)` on `agentFunction` in `infra/stack.ts` and

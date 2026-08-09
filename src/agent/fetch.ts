@@ -196,7 +196,6 @@ export async function runFetch(params: RunFetchParams): Promise<RunFetchResult> 
       notificationsSent: 0,
       error: errors.join('; '),
     });
-    db.close();
     return publish(db, params, priorEtag, runId, now, 0, errors);
   }
 
@@ -238,7 +237,6 @@ export async function runFetch(params: RunFetchParams): Promise<RunFetchResult> 
       notificationsSent: 0,
       error: errors.join('; '),
     });
-    db.close();
     return publish(db, params, priorEtag, runId, now, 0, errors);
   }
 
@@ -328,9 +326,12 @@ export async function runFetch(params: RunFetchParams): Promise<RunFetchResult> 
 }
 
 /**
- * Short-circuits the publish step for tick-level failures — reopens the DB, closes it,
- * and returns the standard RunFetchResult. The early-return paths in `runFetch` use
- * this so the conditional-publish logic only lives in one place.
+ * Short-circuits the publish step for tick-level failures — closes the passed-in DB,
+ * publishes the snapshot, and returns the standard RunFetchResult. On a publish
+ * failure it reopens the DB to record the run as failed before re-throwing. The
+ * early-return paths in `runFetch` use this so the conditional-publish logic only
+ * lives in one place. The caller must NOT close `db` before calling — this helper
+ * owns the close.
  */
 function publish(
   db: Database.Database,
