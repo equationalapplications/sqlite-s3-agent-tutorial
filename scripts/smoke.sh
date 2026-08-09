@@ -86,9 +86,11 @@ status_response=$(curl -s --aws-sigv4 "aws:amz:$REGION:lambda" \
   --data '{"op":"status"}' \
   "$FUNCTION_URL")
 
-echo "$status_response" | jq .
+printf '%s\n' "$status_response" | jq .
 
-weather_present=$(echo "$status_response" | jq '.sources[] | select(.name == "weather") | .lastValue')
+# printf '%s\n' passes the JSON through verbatim — echo can mangle backslash escapes and
+# treat a leading '-' as a flag in some shells.
+weather_present=$(printf '%s\n' "$status_response" | jq '.sources[] | select(.name == "weather") | .lastValue')
 if [ -z "$weather_present" ] || [ "$weather_present" = "null" ]; then
   echo "FAIL: no weather source with a lastValue in status response" >&2
   exit 1

@@ -1,5 +1,5 @@
 // tests/status.test.ts
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -47,8 +47,9 @@ describe('createStatusReader', () => {
 
   it('downloads and returns sources + recentNotifications on first call', async () => {
     await seedSnapshot(ctx.dbPath, ctx.store);
-    writeFileSync(ctx.dbPath, ''); // simulate cold start: local file absent/stale
 
+    // The reader's dbPath (reader-copy.db) does not exist yet, so the cold-start branch
+    // is the one under test without needing to pre-create or corrupt a file at the path.
     const reader = createStatusReader(join(ctx.dir, 'reader-copy.db'));
     const result = await reader.getStatus(ctx.store, 'memory.db');
 

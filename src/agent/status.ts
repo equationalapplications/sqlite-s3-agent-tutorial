@@ -37,14 +37,18 @@ export interface StatusReader {
 }
 
 function queryStatus(db: Database.Database, etag: string): StatusResult {
+  // ORDER BY name keeps the sources list deterministic across SQLite versions and
+  // vacuuming — without it, SQL does not guarantee row order.
   const sources = db
-    .prepare(`SELECT name, last_value, last_fetched_at, last_posted_at FROM agent_sources`)
+    .prepare(`SELECT name, last_value, last_fetched_at, last_posted_at FROM agent_sources ORDER BY name`)
     .all() as Array<{ name: string; last_value: string | null; last_fetched_at: number | null; last_posted_at: number | null }>;
 
+  // id DESC is a tie-breaker for notifications that share the same posted_at — without
+  // it, the LIMIT picks an arbitrary subset and the endpoint output is not stable.
   const notifications = db
     .prepare(
       `SELECT source, value, formatted_message, posted_at FROM agent_notifications
-       ORDER BY posted_at DESC LIMIT ?`,
+       ORDER BY posted_at DESC, id DESC LIMIT ?`,
     )
     .all(RECENT_NOTIFICATIONS_LIMIT) as Array<{
     source: string;

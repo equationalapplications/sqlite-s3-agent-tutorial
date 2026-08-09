@@ -58,7 +58,7 @@ describe('runHandler', () => {
     expect(body.outcome).toBe('success');
   });
 
-  it('routes op="status" through the reader and returns 200 with sources/recentNotifications', async () => {
+  it('routes op="status" through the reader and returns 200 with the empty-state shape when no snapshot exists', async () => {
     s3.on(GetObjectCommand).rejects({ name: 'NoSuchKey' });
     s3.on(PutObjectCommand).resolves({ ETag: '"v1"' });
     bedrock.on(ConverseCommand).resolves({
