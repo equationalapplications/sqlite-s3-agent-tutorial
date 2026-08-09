@@ -1,13 +1,19 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
+import { Uint8ArrayBlobAdapter } from '@smithy/util-stream';
 import { mockClient } from 'aws-sdk-client-mock';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createTitanEmbedder } from '../src/embed/titan.js';
 
 const bedrock = mockClient(BedrockRuntimeClient);
 
+// The SDK's real InvokeModelCommandOutput.body is a Uint8ArrayBlobAdapter (adds
+// transformToString on top of Uint8Array) — a plain TextEncoder().encode() Uint8Array
+// doesn't satisfy that type under this repo's strict typecheck.
 function embeddingResponse(embedding: number[]) {
   return {
-    body: new TextEncoder().encode(JSON.stringify({ embedding, inputTextTokenCount: embedding.length })),
+    body: Uint8ArrayBlobAdapter.mutate(
+      new TextEncoder().encode(JSON.stringify({ embedding, inputTextTokenCount: embedding.length })),
+    ),
     contentType: 'application/json',
   };
 }
@@ -60,7 +66,7 @@ describe('createTitanEmbedder', () => {
 
   it('throws on a response with no embedding array, no retry', async () => {
     bedrock.on(InvokeModelCommand).resolves({
-      body: new TextEncoder().encode(JSON.stringify({ inputTextTokenCount: 5 })),
+      body: Uint8ArrayBlobAdapter.mutate(new TextEncoder().encode(JSON.stringify({ inputTextTokenCount: 5 }))),
       contentType: 'application/json',
     });
 
