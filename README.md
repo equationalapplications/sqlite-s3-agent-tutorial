@@ -35,6 +35,8 @@ npm run deploy
 npm run smoke
 ```
 
+`npm run smoke` is read-only and safe to run any time, including while a loop tick is in flight — it never invokes `fetch`, never posts to Discord, and never calls Bedrock. It probes the status Function URL with SigV4 and asserts the URL actually requires it.
+
 Before your first deploy, ensure your AWS account in `us-east-1` has an active AWS
 Marketplace subscription for `zai.glm-4.7-flash` (Bedrock enables foundation-model access
 by default in commercial Regions once the Marketplace subscription is in place; the legacy
@@ -72,12 +74,17 @@ confirm the state, then re-run `loop-stop.sh` if you want the loop to stay off. 
 [docs/07-budget-protection.md](docs/07-budget-protection.md) for the per-day
 Bedrock call rate at 5-min cadence.
 
+To verify the reader side of the loop (no Discord post, no Bedrock call), run
+`npm run smoke` — it checks the status endpoint and confirms it is SigV4-protected.
+
 ## Triggering a fetch on demand
 
 The daily `fetch` run is normally EventBridge's job, but you can also trigger one over
-HTTP via the same Function URL the `status` op uses. This is off by default — set
-`FETCH_TRIGGER_TOKEN` before deploying (`export FETCH_TRIGGER_TOKEN=...` before
-`npm run deploy`, alongside `DISCORD_WEBHOOK_URL`), then:
+HTTP via the same Function URL the `status` op uses. The Function URL is locked to
+AWS_IAM — your CLI credentials must be authorized against the same-account URL grant
+the stack synthesizes (smoke-status-iam design §3.1) before the request reaches the
+handler. This is off by default — set `FETCH_TRIGGER_TOKEN` before deploying (`export
+FETCH_TRIGGER_TOKEN=...` before `npm run deploy`, alongside `DISCORD_WEBHOOK_URL`), then:
 
 ```bash
 curl -X POST "$FUNCTION_URL?token=$FETCH_TRIGGER_TOKEN" --data '{"op":"fetch"}'

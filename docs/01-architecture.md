@@ -1,13 +1,20 @@
 # Architecture
 
-One Lambda function. Two operations, read as `event.op`: `fetch` (the writer, run daily by
-EventBridge) and `status` (the reader, exposed by a Function URL). Both read and write the
-same single SQLite file that lives durably in one S3 object, but each keeps its own
-transient copy in `/tmp` for the lifetime of the execution environment: the writer at
-`${DB_PATH}` (default `/tmp/memory.db`), the reader at `${DB_PATH}.reader` (default
-`/tmp/memory.db.reader`). Warm Lambda invocations share that `/tmp`, which is exactly what
-lets the status reader reuse its cached database handle (see
-[docs/02-rehydration.md](02-rehydration.md)); cold starts discard it and rehydrate from S3.
+One Lambda function. Two operations, read as `event.op`: `fetch` (the writer, run on a
+5-minute EventBridge schedule) and `status` (the reader, exposed by a Function URL locked
+to `authType: AWS_IAM`). Both read and write the same single SQLite file that lives
+durably in one S3 object, but each keeps its own transient copy in `/tmp` for the
+lifetime of the execution environment: the writer at `${DB_PATH}` (default
+`/tmp/memory.db`), the reader at `${DB_PATH}.reader` (default `/tmp/memory.db.reader`).
+Warm Lambda invocations share that `/tmp`, which is exactly what lets the status reader
+reuse its cached database handle (see [docs/02-rehydration.md](02-rehydration.md)); cold
+starts discard it and rehydrate from S3.
+
+The Function URL's `AWS_IAM` auth means a status read (or the on-demand HTTP fetch
+trigger) requires a SigV4-signed request from a principal the stack grants access to —
+by default, any principal in the deploying account. The on-demand `FETCH_TRIGGER_TOKEN`
+documented in the README is an application-level defense-in-depth check layered on top
+of that IAM grant, not a substitute for it.
 
 ## Why one file in S3 instead of a database server
 
