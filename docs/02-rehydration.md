@@ -46,6 +46,14 @@ against an unchanged snapshot. Re-downloading the whole SQLite file on every req
 work, but it's wasted I/O on a warm Lambda container that already has last version on
 disk.
 
+The reader is reached via the Function URL, which `infra/stack.ts` locks to
+`authType: AWS_IAM` and grants to the deploying account. A status read therefore requires
+a SigV4-signed request from a same-account principal — `curl` without signing (or a
+browser, which can't sign) gets `403` from the URL itself before the handler ever runs.
+The retry-aware `npm run smoke` is the tutorial's end-to-end check that both halves of
+this hold: the unsigned probe returns `403`, the signed probe returns `200` with the
+documented schema.
+
 Instead, the reader's state lives in a closure returned by `createStatusReader` — that
 closure holds the last snapshot's S3 ETag and the open read-only SQLite handle.
 `src/handler.ts` keeps a module-scope `Map<dbPath, StatusReader>` and looks up (or creates)

@@ -8,7 +8,6 @@ import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { type Construct } from 'constructs';
 
-const STACK_NAME = 'SqliteS3AgentTutorial';
 const IMAGE_DIR = '.';
 
 interface AgentStackProps extends cdk.StackProps {
@@ -21,8 +20,12 @@ interface AgentStackProps extends cdk.StackProps {
  * Provisions the full tutorial substrate: one bucket, one Lambda function (both ops), one
  * EventBridge schedule, one Function URL (spec §2). `reservedConcurrentExecutions: 1`
  * enforces the single-writer invariant (spec §2).
+ *
+ * Exported for `tests/infra.test.ts`, which instantiates the stack under a deterministic
+ * synth environment. The CDK CLI entrypoint lives in `infra/app.ts`; this module is
+ * side-effect-free on import.
  */
-class AgentStack extends cdk.Stack {
+export class AgentStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: AgentStackProps = {}) {
     super(scope, id, props);
 
@@ -110,17 +113,23 @@ class AgentStack extends cdk.Stack {
     });
     agentFunction.addToRolePolicy(bedrockPolicy);
 
-    // ---- Function URL (status reads, PR3 completes the op) ----
+    // ---- Function URL (status reads, op:status) ----
 
-    // Tutorial readers hit this URL with curl or a browser (spec §2 architecture
-    // diagram: "HTTP client (curl, browser)" → Function URL with no auth). AWS_IAM
-    // would require SigV4 signing and break the simplest case. The `status` op is
-    // wired up in PR3; revisit auth then if readers need access control.
+    // Locked to AWS_IAM (smoke-status-iam design §3.1): the URL enforces SigV4
+    // at the AWS boundary; the on-demand `FETCH_TRIGGER_TOKEN` in src/handler.ts
+    // is application-level defense in depth for the HTTP-triggered `fetch` op
+    // (which EventBridge never invokes) — not a substitute for this grant.
     const functionUrl = agentFunction.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.NONE,
+      authType: lambda.FunctionUrlAuthType.AWS_IAM,
     });
 
-    // ---- EventBridge schedule (op: fetch, once a day) ----
+    // Same-account principal (design §3.1). `grantInvokeUrl` synthesizes both
+    // `lambda:InvokeFunctionUrl` and the URL-scoped `lambda:InvokeFunction`
+    // permission required for Function URL invocation. Cross-account access is
+    // out of scope (design §8); per-user auditability is a future spec.
+    functionUrl.grantInvokeUrl(new iam.AccountPrincipal(this.account));
+
+    // ---- EventBridge schedule (op: fetch, every 5 minutes) ----
 
     // Constant JSON input, not a transformed event payload (spec §2): the handler reads
     // event.op directly without unwrapping EventBridge's own envelope shape.
@@ -201,17 +210,3 @@ function parseReservedConcurrency(raw: string | undefined): number {
   }
   return parsed;
 }
-
-// ---- App entry point ----
-
-const app = new cdk.App();
-
-new AgentStack(app, STACK_NAME, {
-  env: {
-    ...(process.env.CDK_DEFAULT_ACCOUNT ? { account: process.env.CDK_DEFAULT_ACCOUNT } : {}),
-    region: process.env.CDK_DEFAULT_REGION ?? 'us-east-1',
-  },
-  ...(process.env.BEDROCK_MODEL_ID ? { bedrockModelId: process.env.BEDROCK_MODEL_ID } : {}),
-  ...(process.env.WEATHER_LOCATION ? { weatherLocation: process.env.WEATHER_LOCATION } : {}),
-  ...(process.env.FETCH_TRIGGER_TOKEN ? { fetchTriggerToken: process.env.FETCH_TRIGGER_TOKEN } : {}),
-});

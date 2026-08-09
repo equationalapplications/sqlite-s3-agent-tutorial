@@ -192,7 +192,7 @@ describe('runFetch', () => {
       .all() as Array<{ formatted_message: string; base_message: string; nearest_match_id: number | null }>;
     expect(rows).toHaveLength(2);
     for (const row of rows) {
-      expect(row.formatted_message).toBe(row.base_message);
+      expect(row.formatted_message).toBe(`${row.base_message}\n\n`);
       expect(row.nearest_match_id).toBeNull();
     }
     reopened.close();
@@ -634,16 +634,16 @@ describe('runFetch', () => {
 });
 
 describe('buildFinalMessageForDiscord', () => {
-  it('returns preMessage unchanged when there is no RAG match', () => {
+  it('returns preMessage + trailing blank when there is no RAG match', () => {
     const result = buildFinalMessageForDiscord('hello world', null);
-    expect(result).toBe('hello world');
+    expect(result).toBe('hello world\n\n');
   });
 
   it('appends the suffix verbatim when preMessage + suffix fits under 2000 chars', () => {
     const preMessage = 'A short comment about today.';
     const baseMessage = 'A past comment from yesterday.';
     const result = buildFinalMessageForDiscord(preMessage, baseMessage);
-    expect(result).toBe(`${preMessage}\n\nReminds me of: ${baseMessage}`);
+    expect(result).toBe(`${preMessage}\n\nReminds me of: ${baseMessage}\n\n`);
     expect(result.length).toBeLessThanOrEqual(2000);
   });
 
@@ -656,7 +656,7 @@ describe('buildFinalMessageForDiscord', () => {
     expect(result.length).toBeLessThanOrEqual(2000);
     expect(result.startsWith(preMessage)).toBe(true);
     expect(result).toContain('Reminds me of: ');
-    expect(result.endsWith('...')).toBe(true);
+    expect(result.endsWith('...\n\n')).toBe(true);
     // The baseMessage portion is clipped — not the whole 200 chars survive.
     expect(result.length).toBeLessThan(preMessage.length + 19 + 200);
   });
@@ -666,6 +666,7 @@ describe('buildFinalMessageForDiscord', () => {
     const result = buildFinalMessageForDiscord(preMessage, 'a past message');
     expect(result.length).toBe(2000);
     expect(result).not.toContain('Reminds me of');
+    expect(result.endsWith('\n\n')).toBe(true);
   });
 
   it('omits the suffix entirely when there is no room for even a clipped version', () => {
@@ -674,7 +675,7 @@ describe('buildFinalMessageForDiscord', () => {
     const preMessage = 'a'.repeat(1995);
     const baseMessage = 'b'.repeat(200);
     const result = buildFinalMessageForDiscord(preMessage, baseMessage);
-    expect(result).toBe(preMessage);
+    expect(result).toBe(`${preMessage}\n\n`);
   });
 
   it('accepts a custom limit (used for the snowball regression test threshold of 500)', () => {
@@ -683,6 +684,39 @@ describe('buildFinalMessageForDiscord', () => {
     const result = buildFinalMessageForDiscord(preMessage, baseMessage, 500);
     expect(result.length).toBeLessThanOrEqual(500);
     expect(result.startsWith(preMessage)).toBe(true);
-    expect(result.endsWith('...')).toBe(true);
+    expect(result.endsWith('...\n\n')).toBe(true);
+  });
+
+  // Boundary checks for the limit parameter. Without these, limits below
+  // TRAILING_BLANK.length (i.e. 0 or 1) cause slice(0, negative) to return the
+  // original string, so the helper would silently exceed the requested limit.
+  it('rejects limit < TRAILING_BLANK.length with a RangeError', () => {
+    for (const badLimit of [0, 1]) {
+      expect(() => buildFinalMessageForDiscord('hello', null, badLimit)).toThrow(
+        RangeError,
+      );
+      expect(() => buildFinalMessageForDiscord('hello', null, badLimit)).toThrow(
+        /must be an integer >= 2/,
+      );
+    }
+  });
+
+  it('rejects non-integer limits with a RangeError', () => {
+    expect(() => buildFinalMessageForDiscord('hello', null, 1.5)).toThrow(
+      RangeError,
+    );
+    expect(() => buildFinalMessageForDiscord('hello', null, 1.5)).toThrow(
+      /must be an integer >= 2/,
+    );
+    expect(() => buildFinalMessageForDiscord('hello', null, NaN)).toThrow(
+      RangeError,
+    );
+  });
+
+  it('accepts limit equal to TRAILING_BLANK.length', () => {
+    // limit=2 → effectiveLimit=0 → ??→ `preMessage.slice(0, 0) + TRAILING_BLANK`.
+    const result = buildFinalMessageForDiscord('hello', null, 2);
+    expect(result).toBe('\n\n');
+    expect(result.length).toBe(2);
   });
 });

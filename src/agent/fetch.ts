@@ -42,6 +42,10 @@ export const DISCORD_MAX_MESSAGE_CHARS = 2000;
 
 const REMINDS_ME_OF_SEPARATOR = '\n\nReminds me of: ';
 const SUFFIX_TRUNCATION_MARKER = '...';
+// Trailing blank line appended to every Discord message so adjacent messages stacked in
+// the channel have a clear bottom edge. Reserved from the budget below so a message that
+// fits Discord's 2000-char cap still ends with a visible blank.
+const TRAILING_BLANK = '\n\n';
 
 /**
  * Builds the message posted to Discord from the LLM's pre-suffix output and the
@@ -56,31 +60,45 @@ const SUFFIX_TRUNCATION_MARKER = '...';
  *  - If the suffix does not fit but there is room for at least a clipped version,
  *    truncate `baseMessage` to fit and append `...` as a clip marker.
  *  - If there is not even room for the separator, omit the suffix entirely.
+ *  - Every returned string ends with `\n\n` (the trailing blank line). Two chars are
+ *    reserved from the budget for it, so even the truncating paths still end with one.
  */
 export function buildFinalMessageForDiscord(
   preMessage: string,
   baseMessage: string | null,
   limit: number = DISCORD_MAX_MESSAGE_CHARS,
 ): string {
-  if (preMessage.length > limit) {
-    return preMessage.slice(0, limit);
+  if (!Number.isInteger(limit) || limit < TRAILING_BLANK.length) {
+    throw new RangeError(
+      `buildFinalMessageForDiscord: limit must be an integer >= ${TRAILING_BLANK.length} (got ${limit})`,
+    );
+  }
+  const effectiveLimit = limit - TRAILING_BLANK.length;
+  if (preMessage.length > effectiveLimit) {
+    return preMessage.slice(0, effectiveLimit) + TRAILING_BLANK;
   }
   if (baseMessage === null) {
-    return preMessage;
+    return preMessage + TRAILING_BLANK;
   }
   const fullSuffix = REMINDS_ME_OF_SEPARATOR + baseMessage;
-  if (preMessage.length + fullSuffix.length <= limit) {
-    return preMessage + fullSuffix;
+  if (preMessage.length + fullSuffix.length <= effectiveLimit) {
+    return preMessage + fullSuffix + TRAILING_BLANK;
   }
   // Need to clip the suffix. Room available for the entire suffix line.
-  const room = limit - preMessage.length;
+  const room = effectiveLimit - preMessage.length;
   // No room for even the separator + clip marker — drop the suffix entirely.
   if (room < REMINDS_ME_OF_SEPARATOR.length + SUFFIX_TRUNCATION_MARKER.length) {
-    return preMessage;
+    return preMessage + TRAILING_BLANK;
   }
   const clippedBase =
     room - REMINDS_ME_OF_SEPARATOR.length - SUFFIX_TRUNCATION_MARKER.length;
-  return preMessage + REMINDS_ME_OF_SEPARATOR + baseMessage.slice(0, clippedBase) + SUFFIX_TRUNCATION_MARKER;
+  return (
+    preMessage +
+    REMINDS_ME_OF_SEPARATOR +
+    baseMessage.slice(0, clippedBase) +
+    SUFFIX_TRUNCATION_MARKER +
+    TRAILING_BLANK
+  );
 }
 
 /**

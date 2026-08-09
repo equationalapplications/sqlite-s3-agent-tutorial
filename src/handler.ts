@@ -146,9 +146,12 @@ export async function runHandler(
 
   // Fetch posts to Discord and calls Bedrock on every invocation — EventBridge's schedule
   // is trusted by construction (its payload is a literal constant this stack itself
-  // configures), but an HTTP-triggered fetch is reachable by anyone with the Function URL,
-  // so it requires a matching FETCH_TRIGGER_TOKEN. Unset token (the default) rejects all
-  // HTTP-triggered fetches rather than defaulting to open (spec: on-demand trigger design).
+  // configures), but an HTTP-triggered fetch crosses the Function URL boundary, which
+  // is locked to AWS_IAM at the AWS layer (infra/stack.ts). With that in place, the
+  // only callers that can reach this branch are same-account IAM principals; the
+  // `FETCH_TRIGGER_TOKEN` check below is application-level defense in depth, not a
+  // substitute for the IAM grant. Unset token (the default) rejects all HTTP-triggered
+  // fetches rather than defaulting to open (spec: on-demand trigger design).
   if (op === 'fetch' && resolveIsHttpTriggered(event)) {
     const provided = event.queryStringParameters?.token;
     if (config.fetchTriggerToken === null || provided === undefined || !tokensMatch(provided, config.fetchTriggerToken)) {

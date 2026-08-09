@@ -1,5 +1,5 @@
 {
-  "app": "npx tsx infra/stack.ts",
+  "app": "npx tsx infra/app.ts",
   "context": {
     "@aws-cdk/core:stackRelativeExports": true
   }
