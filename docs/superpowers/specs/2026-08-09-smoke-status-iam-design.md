@@ -1,7 +1,7 @@
 # Loop Mode Smoke Test: IAM-Protected Status Probe — Design
 
 **Date:** 2026-08-09  
-**Status:** Implemented (spec aligned with shipped code, 2026-08-09)  
+**Status:** Implemented and live-verified (spec aligned with shipped code, 2026-08-09; live post-deploy verification recorded in §9.1)  
 **Scope:** Make `scripts/smoke.sh` a read-only, IAM-authenticated status probe now that EventBridge owns all scheduled `fetch` writes. Align the Function URL configuration, smoke-test behavior, and public documentation so the tutorial genuinely teaches and verifies SigV4 access without creating duplicate Discord posts or unnecessary Bedrock calls.
 
 ---
@@ -223,6 +223,19 @@ The implementation is complete when all of the following pass:
 - [x] The shell harness asserts in every scenario that `aws lambda invoke` and the `fetch` payload are never sent.
 - [x] The CDK synth suite asserts `AuthType: AWS_IAM` on the `AWS::Lambda::Url` resource, both URL invocation permissions, and the unchanged EventBridge state.
 - [x] `npm run typecheck`, `npm run build`, and `cdk synth` complete cleanly.
-- [x] `npm run smoke` runs to completion immediately after `npm run deploy` (no fetch, `200` empty state, exit 0) and while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Pre-deploy verification: the shell harness in `tests/smoke.test.ts` exercises every branch with stubbed `aws`/`curl`/`sleep` and asserts the read-only invariant — see §5.1.)*
-- [ ] `npm run smoke` runs to completion immediately after `npm run deploy` (no fetch, `200` empty state, exit 0) and while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Live post-deploy check is an operator action; pre-deploy verifications all pass.)*
+- [x] `npm run smoke` runs to completion immediately after `npm run deploy` (no fetch, `200` empty state, exit 0) and while a loop tick is active (no fetch, signed `200` after any `429` retries, exit 0). *(Harness verification: the shell harness in `tests/smoke.test.ts` exercises every branch with stubbed `aws`/`curl`/`sleep` and asserts the read-only invariant — see §5.1. Live verification against the deployed stack covered the populated-response and `429`-retry paths only; the `snapshotVersion: null` empty-state branch remains harness-only — see §9.1.)*
+
+### 9.1 Live verification record (2026-08-09)
+
+Verified against the deployed stack after `npm run deploy` landed the `AWS_IAM` URL change.
+
+- **Regression gate proved itself against a real misconfiguration.** Run before the deploy, against the then-current stack whose URL was still `AuthType: NONE`, the unsigned probe returned `200` and the script exited non-zero with the §4 "URL misconfigured back to `NONE`" message. This is the §4 row firing against a genuinely public URL, not a stub.
+- **Post-deploy, loop stopped.** Unsigned → `403` (body `{"Message":"Forbidden"}`, rejected at the AWS layer before reaching the handler). Signed → `200` on attempt 1. Exit 0.
+- **Post-deploy, loop running.** 127 consecutive `scripts/smoke.sh` runs over 8 minutes, spanning three live `rate(5 minutes)` ticks: 127/127 unsigned probes returned `403`; all signed probes ended `200`; zero non-zero exits.
+- **`429` retry path caught live.** Run 127 at `16:57:14Z` logged `Attempt 1: status 429` then `Attempt 2: status 200`, correlating with the fetch tick at `16:57:17Z` (`Duration: 2311.45 ms`). The signed probe hit the `reservedConcurrentExecutions: 1` mutex, backed off `RETRY_DELAY`, and succeeded — the §4 "run while a loop tick is in flight" row against real Lambda concurrency.
+- **Read-only invariant held live.** Across the 8-minute window the log group showed exactly three fetch-length invocations (16:47:17, 16:52:19, 16:57:17) — one per scheduled tick and no others. 127 smoke runs produced zero fetches, zero Discord posts, zero Bedrock calls, and `memory.db` changed only on tick boundaries.
+
+**Caveat — empty-state branch is still harness-only.** The deploy landed on a bucket that already held `memory.db`, so the live runs exercised the populated branch (`Weather source lastValue: NYC: +83°F`). The `snapshotVersion: null` empty-state response is covered by the §5.1 harness but has not been observed live; doing so would require deleting the snapshot object.
+
+**Note for future live runs.** A tick's contention window is only ~2.3 s out of every 300 s, so a single smoke run is unlikely to observe a `429`. Catching it took repeated back-to-back runs across multiple ticks.
 - [x] README and `docs/01-architecture.md`, `docs/02-rehydration.md`, `docs/07-budget-protection.md` describe the Function URL as IAM-authenticated and note the on-demand token as defense in depth.
