@@ -1,21 +1,18 @@
 # Bedrock model comparison (us-east-1)
 
-> **Provenance.** This file is research from a sibling project (`aws-cloud-agent`,
-> `@equationalapplications/core-llm-wiki`) where `low`/`med`/`high` tier switching and a
-> `TIER_DEFAULTS` constant live in `src/config.ts`. It is kept in this PR as background
-> reading for PR2/PR3's `BedrockFormatter` work — **not** because this tutorial defines
-> those tiers. The tutorial's actual Bedrock configuration surface is the single
-> `bedrockModelId` field documented in `docs/superpowers/specs/2026-08-08-sqlite-s3-agent-tutorial-design.md`
-> §11 (default `zai.glm-4.7-flash`).
->
-> References to `src/judge/assess.ts`, `infra/stack.ts`, `MAX_TOKENS_MED`, `doRunHeal`,
-> `maintain`, `g3UntypedFacts`, and the `src/bedrock/families.ts` family registry all
-> belong to the sibling project and do not exist in this repo.
+> **Provenance.** This file is general-purpose Bedrock model research. Model pricing,
+> capability, and latency characteristics are not project-specific, so the table below
+> is a starting point for any reader picking a Bedrock model. The tier recommendations
+> at the bottom of the file are tutorial-specific — they cover the `low`/`med`/`high`
+> tiers the tutorial uses. Adding a new tier or pointing an existing tier at a model
+> from a different family requires an entry in `src/format/families.ts` (verified by a
+> live probe with a negative control, not by reading model cards) and a matching
+> resource ARN in `infra/stack.ts`.
 
-Reference for picking/repointing tier models in the sibling project. Update this table
-when tiers change or when re-probing. For this tutorial, start with the recommended
-`med`/`low` pick below (`zai.glm-4.7-flash`) and revisit only if Bedrock integration
-(`PR2`) needs a different model.
+Reference for picking a Bedrock model in any project. Update this table
+when pricing changes or when re-probing. For this tutorial, start with the recommended
+`med`/`low` pick below (`zai.glm-4.7-flash`) and revisit only if the deployed model's
+behaviour regresses.
 
 **Methodology:** prices are pulled from the AWS Pricing API
 (`aws pricing list-price-lists` / `get-price-list-file-url`, `AmazonBedrock` service code,
@@ -107,8 +104,12 @@ rather than ranked by headline price.
 | C | Genuine supersession, detector correctly picked the older/lower-confidence side | `uphold` |
 
 Case C is the control: without it, a model biased toward `overturn` scores well on B by luck.
-Plus an ingest test using the library's real `INGEST_SYSTEM_PROMPT`
-(`@equationalapplications/core-llm-wiki`) on a document chunk.
+Plus an ingest test against a document chunk using a typical ingest prompt —
+treated as a **synthetic proxy** rather than a measurement of this tutorial's
+real request. The tutorial's `INGEST_SYSTEM_PROMPT` itself is too tightly bound to
+the writer's schema to reuse as a generic benchmark, so the proxy is used only to
+sanity-check output-token counts; the application-specific ingest cost row is
+explicitly **excluded** from the recommendations below.
 
 **Every candidate was run at least 3 times.** This mattered — see Nemotron Super below.
 
@@ -182,7 +183,7 @@ rather than a single figure.
 - GLM 4.7 Flash is a small MoE model. The `doRunHeal` prompt (a full fact dump) is materially
   harder than anything tested here. If heal quality regresses, GLM 4.7 (non-Flash, $0.60/$2.20)
   is the natural fallback — same family, same request shape, 3/3 on these cases.
-- Adopting these requires new `zai` and `deepseek` family entries in `src/bedrock/families.ts`
+- Adopting these requires new `zai` and `deepseek` family entries in `src/format/families.ts`
   and matching resource ARNs in `infra/stack.ts`, or invocation fails with AccessDenied.
 
 ## Anthropic models (kept for future reference — not currently in use)

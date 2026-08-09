@@ -18,8 +18,8 @@ fixed daily schedule. A production agent is more likely to need multiple write p
 scheduled job and a manually-triggered one, say — which raises the question of whether
 `reservedConcurrentExecutions: 1` is still sufficient once two *different* Lambda
 functions might both want to write. It isn't, on its own: reserved concurrency only
-serializes invocations of one function. Giving every
-writer path the same conditional-write discipline this tutorial uses, so the S3 `If-Match`
+serializes invocations of one function. The fix is to give every writer path the same
+conditional-write discipline this tutorial uses, so the S3 `If-Match`
 precondition — not Lambda's concurrency control — is what actually prevents two writers
 from clobbering each other, regardless of how many entry points call into that logic.
 
@@ -28,7 +28,8 @@ from clobbering each other, regardless of how many entry points call into that l
 This tutorial's `fetch` and `status` share one function because the reader's query is
 cheap. If your reader starts doing real work — search, aggregation, anything with its own
 latency and memory profile — split it into its own function. The two functions still share the storage pattern in this
-tutorial's `docs/02-rehydration.md`; only the deployment topology changes.
+tutorial's `docs/02-rehydration.md`; only the deployment
+topology changes.
 
 ## Model selection
 
@@ -42,6 +43,6 @@ else" reasoning that doc records.
 
 The rehydration protocol — bootstrap, conditional writes, version-cached reads — doesn't
 change shape as the system grows. That's the point of the pattern: it's the same mechanism
-whether the payload is a two-table dedup cache or full knowledge graph
-with a vector index. What changes is how much work happens between hydrate and publish,
-not how hydrate and publish themselves work.
+whether the payload is a two-table dedup cache or a larger state file with more tables and
+indices. What changes is how much work happens between hydrate and publish, not how
+hydrate and publish themselves work.

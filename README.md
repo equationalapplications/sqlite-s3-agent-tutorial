@@ -11,14 +11,23 @@ in S3. No database server, no VPC.
 ```bash
 npm install
 npm test
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..." npm run local-fetch
+
+# Put your webhook URL in an untracked .env (see docs/06-discord-webhook-setup.md),
+# then source it and run the writer — keeping the URL out of shell history.
+set -a; . ./.env; set +a   # .env is gitignored
+npm run local-fetch
 ```
 
 That runs the writer against a local SQLite file with no AWS involved (Phase 1). To
-deploy the real thing:
+get a Discord webhook URL, see
+[docs/06-discord-webhook-setup.md](docs/06-discord-webhook-setup.md). To deploy the
+real thing:
 
 ```bash
 export AWS_PROFILE=your-profile
+# Source the webhook URL from an untracked file rather than echoing it inline —
+# `infra/stack.ts` reads DISCORD_WEBHOOK_URL at synth time and throws if it is unset.
+set -a; . ./.env.discord; set +a   # .env.discord is gitignored
 npm run deploy
 npm run smoke
 ```

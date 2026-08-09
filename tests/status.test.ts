@@ -113,4 +113,118 @@ describe('createStatusReader', () => {
       { name: 'weather', lastValue: '73F', lastFetchedAt: 2000, lastPostedAt: 2000 },
     ]);
   });
+
+  it('clears cache state when store.get throws in the cache-miss path and recovers', async () => {
+    // The cache-miss branch in `src/agent/status.ts` must preserve the spec §4.3.1
+    // invariant: after any throwing step inside the branch, the cache is left at
+    // `(cachedEtag: null, db: undefined)`, NOT `(cachedEtag: <old>, db: undefined)`.
+    // The pre-fix implementation cleared `db` at the top of the branch but left
+    // `cachedEtag` at the prior warm-cache value, which violates the invariant as
+    // soon as `store.get` (or `writeFileSync`, or `openReadOnlyDatabase`) throws.
+    let validBytes: Buffer = Buffer.alloc(0);
+    let nextEtag = 'warm-etag';
+    let getThrows = false;
+    const adaptiveStore = {
+      ...ctx.store,
+      async get(key: string) {
+        if (getThrows) throw new Error('s3 transient');
+        return { body: validBytes, etag: nextEtag };
+      },
+      async head(key: string) {
+        return { etag: nextEtag };
+      },
+    };
+
+    // Seed a valid snapshot so we have bytes to recover with.
+    await seedSnapshot(ctx.dbPath, ctx.store);
+    validBytes = readFileSync(ctx.dbPath);
+
+    const readerDbPath = join(ctx.dir, 'reader-copy.db');
+    const reader = createStatusReader(readerDbPath);
+
+    // Warm the cache so the failing call is a warm-cache-miss, not a cold start.
+    // Without warming, cachedEtag is already null on the failing call and the
+    // invariant assertion below would pass trivially on the buggy implementation.
+    await reader.getStatus(adaptiveStore, 'memory.db');
+    expect(reader.__peekReaderState()).toEqual({ cachedEtag: 'warm-etag', dbIsOpen: true });
+
+    // Force a cache-miss (different ETag) and have store.get throw. The fix clears
+    // both fields at the top of the branch, so a throw anywhere inside leaves the
+    // cache in the empty state. The pre-fix left cachedEtag at 'warm-etag'.
+    nextEtag = 'raced-etag';
+    getThrows = true;
+
+    await expect(reader.getStatus(adaptiveStore, 'memory.db')).rejects.toThrow('s3 transient');
+    // The invariant: cache cleared even though openReadOnlyDatabase was never reached.
+    // The pre-fix implementation left `(cachedEtag: 'warm-etag', db: undefined)` here.
+    expect(reader.__peekReaderState()).toEqual({ cachedEtag: null, dbIsOpen: false });
+
+    // Network recovers — the next call retries the cache-miss path from a clean state.
+    getThrows = false;
+
+    const recovered = await reader.getStatus(adaptiveStore, 'memory.db');
+    expect(recovered.snapshotVersion).toBe('raced-etag');
+    expect(recovered.sources).toEqual([
+      { name: 'weather', lastValue: '72F', lastFetchedAt: 1000, lastPostedAt: 1000 },
+    ]);
+    expect(reader.__peekReaderState()).toEqual({ cachedEtag: 'raced-etag', dbIsOpen: true });
+  });
+
+  it('clears cache state on HEAD-succeeds-GET-null and recovers on the next call', async () => {
+    // The HEAD-succeeds-GET-fails branch (object deleted between HEAD and GET) must:
+    // (a) return the empty-state JSON (treating it as no-snapshot, not throwing),
+    // (b) clear the cache to `(cachedEtag: null, db: undefined)` so the next call sees
+    //     a clean cache-miss — NOT leave `(cachedEtag: <old>, db: undefined)` if the
+    //     reader had a warm cache before the race (spec §4.3.1),
+    // (c) once the underlying object exists, return the seeded data without being
+    //     stuck in a HEAD→GET→empty cycle.
+    let objectExists = true;
+    let validBytes: Buffer = Buffer.alloc(0);
+    let nextEtag = 'warm-etag';
+    const adaptiveStore = {
+      ...ctx.store,
+      async get(key: string) {
+        if (!objectExists) return null; // HEAD-succeeds-GET-fails
+        return { body: validBytes, etag: nextEtag };
+      },
+      async head(key: string) {
+        return { etag: nextEtag };
+      },
+    };
+
+    await seedSnapshot(ctx.dbPath, ctx.store);
+    validBytes = readFileSync(ctx.dbPath);
+
+    const readerDbPath = join(ctx.dir, 'reader-copy.db');
+    const reader = createStatusReader(readerDbPath);
+
+    // Warm the cache so the failing call is a warm-cache-miss. Without this,
+    // cachedEtag is already null on the failing call and the invariant assertion
+    // below passes trivially on the buggy implementation.
+    await reader.getStatus(adaptiveStore, 'memory.db');
+    expect(reader.__peekReaderState()).toEqual({ cachedEtag: 'warm-etag', dbIsOpen: true });
+
+    // HEAD succeeds for a different ETag (object was replaced between warm-up and
+    // now) but GET returns null (race condition — object deleted between calls).
+    objectExists = false;
+    nextEtag = 'raced-etag';
+
+    const first = await reader.getStatus(adaptiveStore, 'memory.db');
+    expect(first).toEqual({ snapshotVersion: null, sources: [], recentNotifications: [] });
+
+    // The invariant: after GET-null, the cache must be back to `(null, undefined)`.
+    // The pre-fix implementation left it at `(cachedEtag: 'raced-etag', db: undefined)`
+    // — an invalid state per spec §4.3.1 — and this assertion catches it.
+    expect(reader.__peekReaderState()).toEqual({ cachedEtag: null, dbIsOpen: false });
+
+    // Object materializes (operator creates it out-of-band, or writer runs).
+    objectExists = true;
+    nextEtag = 'fixed-etag';
+
+    const recovered = await reader.getStatus(adaptiveStore, 'memory.db');
+    expect(recovered.snapshotVersion).toBe('fixed-etag');
+    expect(recovered.sources).toEqual([
+      { name: 'weather', lastValue: '72F', lastFetchedAt: 1000, lastPostedAt: 1000 },
+    ]);
+  });
 });

@@ -1,8 +1,9 @@
 /**
  * Which inference-profile prefixes a Bedrock model family accepts (spec §12.3). Verified
- * against Bedrock, never inferred from a model's name — see the sibling repo's design
- * spec (`aws-cloud-agent/docs/superpowers/specs/2026-08-02-model-provider-adapter-design.md`
- * §5) for the live-probe procedure, including the mandatory negative control.
+ * against Bedrock, never inferred from a model's name. Adding a new family requires a
+ * live probe of accepted prefixes and request shape, including a mandatory negative
+ * control — some families accept unknown request fields silently, so "the request did
+ * not 400" is not evidence a field is supported.
  */
 export interface ModelFamily {
   readonly id: string;
@@ -55,7 +56,7 @@ export function resolveFamily(baseModelId: string): ModelFamily {
     throw new Error(
       `Model id "${baseModelId}" matches no known model family. Known families: ` +
         `${MODEL_FAMILIES.map((f) => f.id).join(', ')}. Add one only after a live probe ` +
-        `against Bedrock (see aws-cloud-agent's model-provider-adapter design spec §5).`,
+        `against Bedrock with a negative control.`,
     );
   }
   return family;
