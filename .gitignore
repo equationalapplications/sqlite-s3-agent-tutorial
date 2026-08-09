@@ -4,3 +4,4 @@ dist/
 *.db-journal
 cdk.out/
 .env
+.codegraph/
