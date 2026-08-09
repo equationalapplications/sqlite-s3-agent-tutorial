@@ -10,9 +10,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-const REPO_ROOT = resolve(__dirname, '..');
+// ESM has no `__dirname`; reconstruct one from `import.meta.url` so the smoke
+// test can locate scripts/smoke.sh regardless of where vitest is invoked from.
+const THIS_DIR = fileURLToPath(new URL('.', import.meta.url));
+const REPO_ROOT = resolve(THIS_DIR, '..');
 const SMOKE_SCRIPT = join(REPO_ROOT, 'scripts', 'smoke.sh');
 
 interface ShimEnv {
