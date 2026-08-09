@@ -96,6 +96,39 @@ run this repeatedly (a real Bedrock call and Discord post each time), see
 [docs/07-budget-protection.md](docs/07-budget-protection.md) before relying on this in a
 deploy you leave running unattended.
 
+## ⚠️ Concurrency Limitations & Scaling Up
+
+The **SQLite-rehydrated-by-S3** pattern operates under a strict **Single-Writer / Low-Concurrency** constraint. Because Amazon S3 does not support partial file locking, standard POSIX filesystem locks (`WAL` mode, `IMMEDIATE` transactions) are completely blind to concurrent AWS Lambda execution containers.
+
+### The Split-Brain Risk
+If two Lambda functions invoke concurrently and attempt to mutate state:
+1. **Lambda A** and **Lambda B** both download the same original database file from S3.
+2. Both modify their local copy in `/tmp`.
+3. Whichever Lambda finishes last will execute `PutObject` and overwrite the other's changes completely. This results in **silent data loss** (lost updates) and state divergence.
+
+---
+
+### How to Scale Beyond Single-Writer Concurrency
+
+If your agent outgrows a single-writer schedule and requires concurrent read/write access, choose one of the following paths depending on your infrastructure preferences:
+
+#### 1. EFS Mount: The Zero-Server Alternative (Recommended)
+If you want to keep using SQLite without managing a traditional database server, attach an **Amazon EFS (Elastic File System)** to your Lambda function.
+* **How it works:** AWS mounts an EFS network drive directly to `/mnt/storage` inside your Lambda container.
+* **The Benefit:** SQLite can read and write to the same `.db` file across hundreds of concurrent Lambda instances. True file-level locking is natively handled by EFS.
+* **Trade-off:** Requires moving your Lambda function into a VPC, which introduces minimal network configuration overhead.
+
+#### 2. Litestream / Litefs: The Replication Stream
+[Litestream](https://litestream.io) runs a background sidecar process alongside SQLite that continuously streams WAL (Write-Ahead Log) frames to an S3 bucket every second.
+* **How it works:** Instead of pulling/pushing a giant database file, it repligates granular changes.
+* **The Benefit:** Drastically reduces S3 network I/O, protects against data loss down to the second, and scales read concurrency beautifully.
+* **Trade-off:** Best suited for long-running containers (ECS Fargate) rather than short-lived, ephemeral Lambda functions.
+
+#### 3. Shift to an Architectural Serverless DB
+When cross-agent transactional consistency becomes a core app requirement, migrate the SQLite relational schema and vector lookups into dedicated cloud-native databases:
+* **Relational Data:** Migrate to **Amazon Aurora Serverless v2 (PostgreSQL/MySQL)** or **DynamoDB**.
+* **Vector Engine:** If using `sqlite-vec` for RAG, migrate those embeddings into **Amazon OpenSearch Serverless**, **pgvector** (on Aurora), or **Pinecone**.
+
 ## What's here
 
 | Doc | Covers |
