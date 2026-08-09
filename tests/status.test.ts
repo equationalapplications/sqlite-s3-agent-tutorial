@@ -263,4 +263,87 @@ describe('createStatusReader', () => {
     const firstNotification = result.recentNotifications.find((n) => n.value === '72F');
     expect(firstNotification?.nearestMatch).toBeNull();
   });
+
+  it('falls back to nearestMatch: null when the snapshot predates the RAG columns', async () => {
+    // Simulate a `memory.db` written before the RAG feature shipped: `agent_notifications`
+    // exists without `nearest_match_id` / `nearest_match_distance`. The status endpoint is
+    // read-only and must not throw on the joined query when invoked against such a
+    // snapshot before the next fetch run migrates it; it should return the pre-RAG row
+    // shape with `nearestMatch: null`.
+    const db = openDatabase(ctx.dbPath);
+    db.exec(`
+      CREATE TABLE agent_sources (
+        name              TEXT PRIMARY KEY,
+        last_value        TEXT,
+        last_fetched_at   INTEGER,
+        last_posted_at    INTEGER
+      );
+      CREATE TABLE agent_notifications (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        source             TEXT    NOT NULL,
+        value              TEXT    NOT NULL,
+        formatted_message  TEXT    NOT NULL,
+        posted_at          INTEGER NOT NULL
+      );
+    `);
+    db.prepare(
+      `INSERT INTO agent_sources (name, last_value, last_fetched_at, last_posted_at)
+       VALUES ('weather', '72F', 1000, 1000)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO agent_notifications (source, value, formatted_message, posted_at)
+       VALUES ('weather', '72F', 'Looks like 72F today!', 1000)`,
+    ).run();
+    db.close();
+    await ctx.store.put('memory.db', readFileSync(ctx.dbPath), null);
+
+    const reader = createStatusReader(join(ctx.dir, 'reader-copy.db'));
+    const result = await reader.getStatus(ctx.store, 'memory.db');
+
+    expect(result.sources).toEqual([
+      { name: 'weather', lastValue: '72F', lastFetchedAt: 1000, lastPostedAt: 1000 },
+    ]);
+    expect(result.recentNotifications).toEqual([
+      {
+        source: 'weather',
+        value: '72F',
+        formattedMessage: 'Looks like 72F today!',
+        postedAt: 1000,
+        nearestMatch: null,
+      },
+    ]);
+  });
+
+  it('returns nearestMatch: null when nearest_match_id is set but nearest_match_distance is null', async () => {
+    // Partial-write row: the join lands on a real matched notification, but the
+    // distance column is null (e.g., the embed step failed and was isolated for
+    // the match-lookup but still wrote the id without the distance). Emitting an
+    // object with `distance: null` against the declared `number` type would be a
+    // silent lie — guard on every dependent column being non-null and return null.
+    const db = openDatabase(ctx.dbPath);
+    bootstrap(db);
+    db.prepare(
+      `INSERT INTO agent_sources (name, last_value, last_fetched_at, last_posted_at)
+       VALUES ('weather', '72F', 1000, 1000)`,
+    ).run();
+    const firstId = db
+      .prepare(
+        `INSERT INTO agent_notifications (source, value, formatted_message, posted_at)
+         VALUES ('weather', '72F', 'Looks like 72F today!', 1000)`,
+      )
+      .run().lastInsertRowid as number;
+    db.prepare(
+      `INSERT INTO agent_notifications
+         (source, value, formatted_message, posted_at, nearest_match_id, nearest_match_distance)
+       VALUES ('weather', '75F', 'A bit warmer today!', 2000, ?, NULL)`,
+    ).run(firstId);
+    db.close();
+    await ctx.store.put('memory.db', readFileSync(ctx.dbPath), null);
+
+    const reader = createStatusReader(join(ctx.dir, 'reader-copy.db'));
+    const result = await reader.getStatus(ctx.store, 'memory.db');
+
+    const secondNotification = result.recentNotifications.find((n) => n.value === '75F');
+    expect(secondNotification?.nearestMatch).toBeNull();
+  });
 });

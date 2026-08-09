@@ -53,6 +53,20 @@ export interface StatusReader {
   __peekReaderState(): { cachedEtag: string | null; dbIsOpen: boolean };
 }
 
+/** Shape every notifications row is normalized to before being mapped into
+ *  `NotificationStatus`, regardless of whether the RAG columns are present on the
+ *  underlying table. Lets the map step stay column-shape-agnostic. */
+interface NotificationRow {
+  source: string;
+  value: string;
+  formatted_message: string;
+  posted_at: number;
+  nearest_match_distance: number | null;
+  matched_source: string | null;
+  matched_formatted_message: string | null;
+  matched_posted_at: number | null;
+}
+
 function queryStatus(db: Database.Database, etag: string): StatusResult {
   // ORDER BY name keeps the sources list deterministic across SQLite versions and
   // vacuuming — without it, SQL does not guarantee row order.
@@ -60,30 +74,57 @@ function queryStatus(db: Database.Database, etag: string): StatusResult {
     .prepare(`SELECT name, last_value, last_fetched_at, last_posted_at FROM agent_sources ORDER BY name`)
     .all() as Array<{ name: string; last_value: string | null; last_fetched_at: number | null; last_posted_at: number | null }>;
 
+  // `nearest_match_id` and `nearest_match_distance` were added by the writer's
+  // bootstrap, not by the base schema's `CREATE TABLE`. A `memory.db` snapshot from
+  // before the RAG feature shipped doesn't have them, and the read-only status
+  // endpoint can be invoked against such a snapshot before the next fetch run has
+  // had a chance to migrate it — in which case the joined query below would throw
+  // `no such column: n.nearest_match_distance`. Feature-detect via `PRAGMA
+  // table_info`, mirroring `addNearestMatchColumnsIfMissing` in `src/db/bootstrap.ts`,
+  // and fall back to the pre-RAG query so the endpoint stays a plain diagnostic.
+  const columnNames = new Set(
+    (db.prepare(`PRAGMA table_info(agent_notifications)`).all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  const hasRagColumns = columnNames.has('nearest_match_id') && columnNames.has('nearest_match_distance');
+
   // id DESC is a tie-breaker for notifications that share the same posted_at — without
   // it, the LIMIT picks an arbitrary subset and the endpoint output is not stable. The
   // LEFT JOIN pulls the matched notification's own source/message/postedAt so the status
   // endpoint is self-contained — no vector search happens here, only a second read of
   // already-open agent_notifications (RAG design spec §7).
-  const notifications = db
-    .prepare(
-      `SELECT n.source, n.value, n.formatted_message, n.posted_at, n.nearest_match_distance,
-              m.source AS matched_source, m.formatted_message AS matched_formatted_message,
-              m.posted_at AS matched_posted_at
-       FROM agent_notifications n
-       LEFT JOIN agent_notifications m ON m.id = n.nearest_match_id
-       ORDER BY n.posted_at DESC, n.id DESC LIMIT ?`,
-    )
-    .all(RECENT_NOTIFICATIONS_LIMIT) as Array<{
-    source: string;
-    value: string;
-    formatted_message: string;
-    posted_at: number;
-    nearest_match_distance: number | null;
-    matched_source: string | null;
-    matched_formatted_message: string | null;
-    matched_posted_at: number | null;
-  }>;
+  const notifications: NotificationRow[] = hasRagColumns
+    ? (db
+        .prepare(
+          `SELECT n.source, n.value, n.formatted_message, n.posted_at, n.nearest_match_distance,
+                  m.source AS matched_source, m.formatted_message AS matched_formatted_message,
+                  m.posted_at AS matched_posted_at
+           FROM agent_notifications n
+           LEFT JOIN agent_notifications m ON m.id = n.nearest_match_id
+           ORDER BY n.posted_at DESC, n.id DESC LIMIT ?`,
+        )
+        .all(RECENT_NOTIFICATIONS_LIMIT) as NotificationRow[])
+    : (
+        db
+          .prepare(
+            `SELECT source, value, formatted_message, posted_at FROM agent_notifications
+             ORDER BY posted_at DESC, id DESC LIMIT ?`,
+          )
+          .all(RECENT_NOTIFICATIONS_LIMIT) as Array<{
+          source: string;
+          value: string;
+          formatted_message: string;
+          posted_at: number;
+        }>
+      ).map((row) => ({
+        source: row.source,
+        value: row.value,
+        formatted_message: row.formatted_message,
+        posted_at: row.posted_at,
+        nearest_match_distance: null,
+        matched_source: null,
+        matched_formatted_message: null,
+        matched_posted_at: null,
+      }));
 
   return {
     snapshotVersion: etag,
@@ -98,15 +139,25 @@ function queryStatus(db: Database.Database, etag: string): StatusResult {
       value: row.value,
       formattedMessage: row.formatted_message,
       postedAt: row.posted_at,
+      // Guard on every dependent column being non-null, not just `matched_source`.
+      // `nearest_match_distance` is written separately from `nearest_match_id` in
+      // `runFetch`, so a partial-write row (or one whose matched row was deleted
+      // out from under the unenforced FK) can have the join columns populated but
+      // the distance null — emitting `distance: null` against a `number` type would
+      // be a silent lie. Treat any missing component as "no match to show," the
+      // same null outcome the user sees on a first-ever notification.
       nearestMatch:
-        row.matched_source === null
-          ? null
-          : {
+        row.matched_source !== null &&
+        row.matched_formatted_message !== null &&
+        row.matched_posted_at !== null &&
+        row.nearest_match_distance !== null
+          ? {
               source: row.matched_source,
-              formattedMessage: row.matched_formatted_message as string,
-              postedAt: row.matched_posted_at as number,
-              distance: row.nearest_match_distance as number,
-            },
+              formattedMessage: row.matched_formatted_message,
+              postedAt: row.matched_posted_at,
+              distance: row.nearest_match_distance,
+            }
+          : null,
     })),
   };
 }
