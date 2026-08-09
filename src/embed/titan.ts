@@ -17,6 +17,23 @@ const MODEL_ID = 'amazon.titan-embed-text-v2:0';
 const DIMENSIONS = 256;
 const RETRY_DELAY_MS = 500;
 
+/** Per-attempt request deadline for a single `InvokeModel` call.
+ *
+ * The Lambda is capped at 30s (infra/stack.ts:87). A Titan outage must not
+ * block the Discord post (RAG design spec §6). Each embedding attempt — even
+ * a stalled one — must leave enough wall-clock for the surrounding work:
+ *
+ *   pre-embed (this) → KNN lookup → Bedrock Converse format → Discord post
+ *   → DB inserts → post-embed (this again) → done
+ *
+ * Worst-case budget at 5s/attempt: 5 + 0.5 + 5 (pre-embed retry) + ~10.5
+ * (format retry, same shape as embed) + ~1 (post) + 5 + 0.5 + 5 (post-embed
+ * retry) ≈ 27.5s, inside the 30s Lambda budget. If this grows, prefer raising
+ * the Lambda timeout (infra/stack.ts) over extending this — Titan latency is
+ * normally well under 2s in the happy path.
+ */
+const REQUEST_TIMEOUT_MS = 5_000;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -66,6 +83,9 @@ function mapTitanError(error: unknown, region: string): Error {
  */
 export function createTitanEmbedder(options: TitanEmbedderOptions): Embedder {
   async function attempt(text: string): Promise<number[]> {
+    // Bound the call so a stalled `send()` can't eat the 30s Lambda budget
+    // before the per-source try/catch in runFetch gets a chance to isolate
+    // the failure (RAG design spec §6, copilot review on PR #5).
     const response = await options.client.send(
       new InvokeModelCommand({
         modelId: MODEL_ID,
@@ -73,6 +93,7 @@ export function createTitanEmbedder(options: TitanEmbedderOptions): Embedder {
         accept: 'application/json',
         body: JSON.stringify({ inputText: text, dimensions: DIMENSIONS, normalize: true }),
       }),
+      { abortSignal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) },
     );
 
     const decoded = new TextDecoder().decode(response.body);

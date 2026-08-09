@@ -100,4 +100,26 @@ describe('createTitanEmbedder', () => {
     await expect(embedder.embed('72F')).rejects.toThrow(/no embedding/i);
     expect(bedrock.commandCalls(InvokeModelCommand)).toHaveLength(1);
   });
+
+  it('passes an AbortSignal to the SDK call, bounded by a request deadline', async () => {
+    // Regression for the copilot review on PR #5: each InvokeModel call must
+    // carry an AbortSignal so a stalled send() can't eat the 30s Lambda
+    // budget before the per-source try/catch in runFetch gets to isolate the
+    // failure (RAG design spec §6). The real abort path is exercised in
+    // production by the SDK's http handler when the signal fires; this test
+    // verifies the wiring.
+    bedrock.on(InvokeModelCommand).resolves(embeddingResponse(vector256));
+
+    const embedder = createTitanEmbedder({ client, region: 'us-east-1' });
+    await embedder.embed('72F');
+
+    // aws-sdk-client-mock's typed `args` is `[Command]`, but at runtime sinon's
+    // stub records both args the SDK passes to `send(command, options)`. Cast
+    // through unknown so we can read `args[1]` (HttpHandlerOptions).
+    const calls = bedrock.commandCalls(InvokeModelCommand) as unknown as Array<{ args: unknown[] }>;
+    const handlerOptions = calls[0]?.args[1] as { abortSignal?: AbortSignal } | undefined;
+    const abortSignal = handlerOptions?.abortSignal;
+    expect(abortSignal).toBeInstanceOf(AbortSignal);
+    expect(abortSignal?.aborted).toBe(false);
+  });
 });
