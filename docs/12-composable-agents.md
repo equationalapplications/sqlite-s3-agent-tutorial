@@ -24,8 +24,8 @@ page uses.
 no timer, no loop, and no opinion about the clock.
 
 **Spin up, work, go away.** One Lambda invocation is the entire lifetime: hydrate the
-SQLite file from S3, call Bedrock twice, post to Discord, conditional-write the file back,
-exit. There is no "between" for the agent to exist in.
+SQLite file from S3, do the agent's scoped work, conditional-write the file back, exit.
+There is no "between" for the agent to exist in.
 
 **Statelessness between runs.** The honest version is more interesting than the slogan.
 `/tmp` is not wiped between invocations — warm containers reuse it, and this repo leans on

@@ -81,8 +81,8 @@ introduced:
 
 - **Heartbeat** = the EventBridge 5-minute schedule described in
   `01-architecture.md` (`{"op":"fetch"}` as the literal `Input`).
-- **Spin up, work, go away** = one Lambda invocation: hydrate from S3, call
-  Bedrock twice, post to Discord, conditional-write back, exit.
+- **Spin up, work, go away** = one Lambda invocation: hydrate from S3, do
+  the agent's scoped work, conditional-write back, exit.
 - **Statelessness between runs** = no *durable* state is held in `/tmp`. Warm
   containers may reuse it — `01-architecture.md` leans on exactly that to let
   the status reader work, and `02-rehydration.md` notes it survives until a
