@@ -25,10 +25,27 @@ committing one markdown file, not a code change.
 ## Placement
 
 New file: `docs/12-composable-agents.md`, numbered to sit alongside the existing
-`01`–`11` docs. Add it to whatever doc index the README maintains (the same way
-`10ba1c7` added `11-aws-bedrock-setup.md` to that index) — check the README's doc
-list and add a corresponding line/entry, following the existing entries'
-format and tone.
+`01`–`11` docs. Add it to the doc index table the README maintains (the same way
+`10ba1c7` added `11-aws-bedrock-setup.md` to that index), following the existing
+entries' format and tone: `| [docs/NN-name.md](docs/NN-name.md) | one-line
+description |`. Two details:
+
+- The index table is the only place to add an entry. The README links to
+  individual docs in prose elsewhere; leave those alone.
+- `bedrock-model-comparison.md` sits last in the table as the only unnumbered
+  row, so the `12-` row goes immediately above it, not at the bottom.
+
+## Length and format
+
+Target roughly 120–180 lines — in the range of the existing conceptual docs
+(`01`–`08`, `10` run 49–157 lines) rather than the two long procedural ones
+(`09` and `11`, 431 and 476). A six-rung ladder can easily outgrow both if each
+rung is allowed to sprawl; keep each rung to a few tight paragraphs.
+
+ASCII diagrams are optional and should be used sparingly if at all.
+`10-concurrency.md` uses two fenced blocks; `01-architecture.md` uses none.
+Rung 4 is the one place a diagram might earn its keep — and it can instead just
+cross-link the diagram `10-concurrency.md` already has.
 
 ## Audience and thesis
 
@@ -42,7 +59,8 @@ retrofitting the tutorial onto it second.
 
 ## Structure: a ladder from the existing Lambda to full hierarchical orchestration
 
-The doc is organized as six sections, each one rung up from the last. Every
+The doc is organized as eight sections — an intro, six rungs, and a closing
+note — each rung one step up from the last. Every
 rung beyond the first is explicitly marked as **not implemented in this repo** —
 conceptual, not a call to action — and cross-links back to the existing docs
 (`01-architecture.md`, `10-concurrency.md`, `05-from-tutorial-to-prod.md`) that
@@ -65,8 +83,13 @@ introduced:
   `01-architecture.md` (`{"op":"fetch"}` as the literal `Input`).
 - **Spin up, work, go away** = one Lambda invocation: hydrate from S3, call
   Bedrock twice, post to Discord, conditional-write back, exit.
-- **Statelessness between runs** = `/tmp` is disposable; all durable state
-  lives in the S3-backed SQLite file, not in the agent process.
+- **Statelessness between runs** = no *durable* state is held in `/tmp`. Warm
+  containers may reuse it — `01-architecture.md` leans on exactly that to let
+  the status reader work, and `02-rehydration.md` notes it survives until a
+  redeploy — but correctness never depends on it. Everything that has to
+  outlive an invocation lives in the S3-backed SQLite file, not in the agent
+  process. State the nuance rather than claiming `/tmp` is simply disposable;
+  a reader who has finished doc 01 will know better.
 - **Why this is "composable"**: because the agent carries no in-memory state
   across invocations, any number of these can exist — different schedules,
   different triggers — as long as they agree on the storage contract, which is
@@ -112,6 +135,11 @@ rather than a new pattern: sub-agents finish their scoped work and emit an
 queue; a single coordinator drains the queue and is the only thing that
 touches the master S3 object. Includes an explicit cross-link to that section.
 
+This rung must also introduce the term **central memory** for the master S3
+object as seen from the hierarchy's point of view — the one shared thing every
+agent's intents eventually land in. Rung 6 builds directly on that term, so it
+has to be named here rather than appearing for the first time later.
+
 ### 6. Rung 5 — follow-up tasks and the EC2 escape hatch
 
 Closes the ladder. When a sub-agent's work doesn't finish within its own
@@ -155,9 +183,19 @@ mapping is conceptual, not a dependency this repo takes on:
   from reading or corrupting a sibling's or the orchestrator's memory.
 
 This rung is explicitly the most speculative: it names a specific external
-package as an illustration of what a fuller "central memory" could look like,
-not a recommendation to adopt it in this tutorial. No code or dependency
-changes are implied.
+package as an illustration of what the central memory from rung 4 could look
+like in a fuller form, not a recommendation to adopt it in this tutorial. No
+code or dependency changes are implied.
+
+**Verify before drafting.** This rung cites a lot of external API surface
+(`WikiMemory`, `entityId`, `tierWeights`, the `tier_wisdom`/`tier_fact`/
+`tier_working` tiers, `node_types`/`edge_types`, the `strict`/`emergent`/`off`
+ontology modes, the `read([entityIdA, entityIdB], …)` signature), and the link
+points at repo `expo-llm-wiki` while the package is named
+`@equationalapplications/core-llm-wiki` — plausible for a monorepo, but
+unconfirmed. Fetch that README first and confirm both the URL and every cited
+name. This is the section most likely to have rotted; drop or soften any
+specific that no longer matches rather than guessing.
 
 ### 8. Closing note
 
@@ -172,9 +210,13 @@ docs to read next for the concrete pieces a real implementation would draw on.
 - No new code, tables, or infrastructure in this repo.
 - No Step Functions / SQS / DynamoDB task-table design — this was explicitly
   scoped out in favor of a conceptual-only page.
-- No new terminology beyond what's needed to name the pattern; reuses
-  "conditional write," "single-writer," "intent," and "coordinator" from the
-  existing docs rather than inventing parallel vocabulary.
+- No *parallel* vocabulary for concepts the existing docs already name. Where
+  a doc already has a word for something — "conditional write," "single-writer,"
+  "intent," "coordinator" — reuse that word rather than coining a synonym. The
+  ladder does introduce terms of its own where nothing existing covers the
+  concept ("heartbeat," "rung," "to-do list," "sub-agent," "central memory");
+  that is expected. The rule is no duplicate names for the same idea, not zero
+  new names.
 
 ## Open questions
 
