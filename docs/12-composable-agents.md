@@ -92,3 +92,52 @@ One thing delegation does **not** change: the single-writer invariant from
 *writers*. Sub-agents do not each get their own conditional write to the shared S3 object
 — thirty agents contending on one ETag is the failure mode that doc describes, not a
 design. Where their results actually go is rung 4.
+
+## Rung 4: intents through a queue, not direct writes
+
+> **Not implemented in this repo.**
+
+Once there is a hierarchy, the question rung 3 deferred comes due: how do a dozen
+sub-agents get their results into one S3 object? Not by each conditional-writing it. That
+is the contention problem — every attempt invalidating someone else's ETag until the fleet
+thrashes instead of committing — and
+[docs/10-concurrency.md](10-concurrency.md#high-contention-the-single-writer-queue)
+already diagrams the answer.
+
+Reuse it exactly as written. Sub-agents become read-only: they hydrate sub-copies, do
+their scoped work, and emit an **intent** — a message describing what changed, not a
+rewritten file — onto a queue. One pinned coordinator, concurrency 1, drains the queue in
+batches and is the only thing that touches the master object. Collisions stop being
+detected and start being impossible, and the S3 write rate drops to one per batch rather
+than one per agent. The costs are the ones that doc already names: writes become
+asynchronous, and at-least-once delivery means the coordinator's apply step has to be
+idempotent.
+
+This rung also gives the master object a name it will need later. Seen from inside the
+hierarchy, it is the **central memory**: the one shared thing every agent's intents
+eventually land in, and the only place where the system's state is authoritative. Rung 6
+is about what that memory could be shaped like.
+
+## Rung 5: follow-up tasks and the EC2 escape hatch
+
+> **Not implemented in this repo.**
+
+Two things break the ladder if left unaddressed, and both are answered by pieces already
+on it.
+
+**Work that doesn't finish.** A sub-agent approaching its timeout does not retry-loop
+inside Lambda, and does not silently drop what it was doing. It writes a **follow-up
+item** back to the to-do list from rung 2 — "resume from here" — and exits cleanly. The
+orchestrator picks it up on a later heartbeat and sequences it like any other item.
+Progress is durable because it was written down, not because a process stayed alive.
+
+**Work that is long-running by nature.** Some tasks are not merely large: they hold a
+connection open, or stream for an hour, or genuinely run past any Lambda budget you could
+justify. Decomposition does not help there. The escape hatch is that rung 4's contract
+does not mention Lambda anywhere — it says *consume from the queue, emit an intent*. An
+EC2 instance or a Fargate task can satisfy that contract as a peer. It reads the same
+queue and emits the same kind of intent, and the coordinator cannot tell, and does not
+need to, which compute produced it.
+
+That is the payoff for making the queue the seam rather than the function: the choice of
+compute becomes a per-task decision instead of an architectural one.
