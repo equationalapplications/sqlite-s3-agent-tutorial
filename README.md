@@ -47,8 +47,8 @@ Before your first deploy, ensure your AWS account in `us-east-1` has an active A
 Marketplace subscription for `zai.glm-4.7-flash` (Bedrock enables foundation-model access
 by default in commercial Regions once the Marketplace subscription is in place; the legacy
 manual *Bedrock → Model access* console flow is no longer the gate for this model) — see
-[docs/02-rehydration.md](docs/02-rehydration.md#bedrock-setup) for what else is required and
-what breaks if you skip it.
+[docs/11-aws-bedrock-setup.md](docs/11-aws-bedrock-setup.md) for the full setup, what else
+is required, and what breaks if you skip it.
 
 ## Loop mode
 
@@ -183,6 +183,7 @@ multi-writer escape hatch it looks like.
 | [docs/08-rag-vector-search.md](docs/08-rag-vector-search.md) | SQLite as a vector database too: sqlite-vec + Titan embeddings |
 | [docs/09-lesson-script.md](docs/09-lesson-script.md) | A 10-lesson script for teaching the RAG extension (frame, check-in questions, expected reasoning) |
 | [docs/10-concurrency.md](docs/10-concurrency.md) | Optimistic S3 rehydration, 412 handling, rebase-and-retry, the single-writer queue |
+| [docs/11-aws-bedrock-setup.md](docs/11-aws-bedrock-setup.md) | Account type, deployer IAM, Marketplace subscription, Region, EULA, first-deploy smoke |
 | [docs/bedrock-model-comparison.md](docs/bedrock-model-comparison.md) | Why `zai.glm-4.7-flash` is the default, and alternatives |
 
 ## Cost
