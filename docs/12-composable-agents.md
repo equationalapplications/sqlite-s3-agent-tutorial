@@ -130,10 +130,8 @@ justify. Decomposition does not help there. The escape hatch is that rung 4's co
 does not mention Lambda anywhere — it says *consume from the queue, emit an intent*. An
 EC2 instance or a Fargate task can satisfy that contract as a peer. It reads the same
 queue and emits the same kind of intent, and the coordinator cannot tell, and does not
-need to, which compute produced it.
-
-That is the payoff for making the queue the seam rather than the function: the choice of
-compute becomes a per-task decision instead of an architectural one.
+need to, which compute produced it. That is the payoff for making the queue the seam
+rather than the function: compute becomes a per-task choice, not an architectural one.
 
 ## Rung 6: tiered memory, a small knowledge graph, and scoped permissions
 
@@ -142,21 +140,21 @@ compute becomes a per-task decision instead of an architectural one.
 > look like in a fuller form. Nothing here is a recommendation to adopt it in this
 > tutorial, and no dependency is implied.
 
-Rung 4 named the central memory without saying what it is shaped like. In this repo it is
-two flat tables. A hierarchy of agents wants more than that, and
+Rung 4 named the central memory without saying what it is shaped like; in this repo it is
+two flat tables. A hierarchy wants more than that, and
 [`@equationalapplications/core-llm-wiki`](https://github.com/equationalapplications/expo-llm-wiki/blob/main/packages/core/README.md)
 — a platform-agnostic TypeScript memory engine built for hybrid LLM memory over SQLite —
 happens to be organized around four things a hierarchy needs.
 
 **Namespacing.** Its `entityId` is the identifier a hierarchy is already missing: each
 orchestrator, sub-agent, or task line reads and writes its own namespace via
-`write(entityId, { event_type, summary })`. A coordinator can read across several at once,
-because `read()` accepts either one entity id or an array of them.
+`write(entityId, { event_type, summary })`, and a coordinator can read across several at
+once, because `read()` accepts one entity id or an array of them.
 
 **Tiering.** Those namespaces can be weighted rather than merely merged. The README's own
-example reads `['tier_wisdom', 'tier_fact', 'tier_working']` with `tierWeights` of `2`, `1`,
-and `0.25` — durable curated knowledge dominating, an in-flight sub-agent's working context
-present but nearly discounted. Tiers are just entity ids with a naming convention.
+example reads `['tier_wisdom', 'tier_fact', 'tier_working']` with `tierWeights` of `2`,
+`1`, and `0.25` — durable curated knowledge dominating, an in-flight sub-agent's working
+context nearly discounted. Tiers are just entity ids with a naming convention.
 
 **A small knowledge graph.** A per-entity seeded ontology (`node_types` and `edge_types`,
 under a `'strict'`, `'emergent'`, or `'off'` mode — `off` by default) lets stored facts
