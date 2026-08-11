@@ -29,7 +29,7 @@ Facts verified against this repo — do not restate them differently:
 | The schedule's EventBridge `Input` is the literal string `{"op":"fetch"}` | `docs/01-architecture.md:66-73` |
 | The function has two ops read from `event.op`: `fetch` (writer, scheduled) and `status` (reader, Function URL with `authType: AWS_IAM`) | `docs/01-architecture.md:3-9` |
 | Warm invocations share `/tmp`; the status reader deliberately reuses its cached handle, and `/tmp` survives until a redeploy | `docs/01-architecture.md:10-12`, `docs/02-rehydration.md:89-91` |
-| `reservedConcurrentExecutions: 1` is the single-writer invariant; the conditional write is a second line of defense | `docs/01-architecture.md:44-52` |
+| `reservedConcurrentExecutions: 1` is the tutorial default for this one Lambda function (overridable via `RESERVED_CONCURRENCY`); the conditional write is a second line of defense scoped to the S3 object | `docs/01-architecture.md:44-52` |
 | The high-contention answer is: read-only agents, writes serialized as SQS messages, one pinned coordinator with concurrency 1, batched apply | `docs/10-concurrency.md:107-142` |
 | Docs 10 already uses the words **intent** and **coordinator** for exactly these roles | `docs/10-concurrency.md:131-134` |
 | The README doc index table runs `docs/01…docs/11`, then `bedrock-model-comparison.md` last as the only unnumbered row | `README.md:176-187` |
@@ -56,7 +56,7 @@ The drafted prose in Task 4 already reflects this. Write it as drafted; do not "
 - **Create** `docs/12-composable-agents.md` — the only new file. Built over Tasks 1–4, one commit per section group, so every commit leaves a readable document. Target 120–180 lines total; the drafted content lands at roughly 155.
 - **Modify** `README.md` — insert one row in the doc index table, immediately above the `bedrock-model-comparison.md` row. Task 5.
 
-Not touched: every other file in the repo, including the other files in `docs/`. Historical records under `docs/superpowers/plans/` and `docs/superpowers/specs/` are never rewritten.
+Not touched: every other file in the repo, including the other files in `docs/`. Historical records under `docs/superpowers/plans/` and `docs/superpowers/specs/` are never rewritten, with one exception: the single `## Status` line of this approved spec flips from `Approved` to `Implemented` in Task 6, and that one-line edit is the only change made to a spec file by this plan.
 
 ---
 
@@ -90,9 +90,9 @@ Create `docs/12-composable-agents.md` with exactly this content:
 # Composable agents
 
 A **lightweight, composable cloud agent** is a thing that spins up, does a few minutes —
-or a few seconds — of work, and goes away. No process stays resident. No state is held in
-memory between runs. Whatever has to outlive one run gets written down somewhere durable
-before the agent exits.
+or a few seconds — of work, and goes away. No process stays resident. The agent carries
+no state in memory that has to outlive an invocation; whatever has to outlive one run
+gets written down somewhere durable before the agent exits.
 
 You already built one. The `fetch` tick in this repo *is* an agent of exactly that shape,
 and the rest of this page is a ladder: rung 1 is the thing you have, and each rung above
@@ -277,10 +277,12 @@ Two things break the ladder if left unaddressed, and both are answered by pieces
 on it.
 
 **Work that doesn't finish.** A sub-agent approaching its timeout does not retry-loop
-inside Lambda, and does not silently drop what it was doing. It writes a **follow-up
-item** back to the to-do list from rung 2 — "resume from here" — and exits cleanly. The
-orchestrator picks it up on a later heartbeat and sequences it like any other item.
-Progress is durable because it was written down, not because a process stayed alive.
+inside Lambda, and does not silently drop what it was doing. It emits an **intent**
+describing a **follow-up item** for the to-do list from rung 2 — "resume from here" —
+and exits cleanly. The coordinator applies the intent on its next drain, the follow-up
+shows up in the to-do list like any other item, and the orchestrator picks it up on a
+later heartbeat. Progress is durable because it was written down through the same queue
+rung 4 already defines, not because a process stayed alive.
 
 **Work that is long-running by nature.** Some tasks are not merely large: they hold a
 connection open, or stream for an hour, or genuinely run past any Lambda budget you could

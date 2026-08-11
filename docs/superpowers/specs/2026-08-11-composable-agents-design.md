@@ -70,8 +70,8 @@ already contain the pieces a real implementation would draw on.
 
 Opens by naming the pattern in the first paragraph: a lightweight, composable
 cloud agent is something that spins up, does a few minutes of work, and goes
-away — no persistent process, no long-lived state held in memory. States
-immediately that this tutorial already built one. The rest of the page is a
+away — no persistent process, and no state in memory that correctness depends on
+holding. States immediately that this tutorial already built one. The rest of the page is a
 ladder from that one concrete instance up to the general pattern.
 
 ### 2. Rung 1 — the fetch tick as a lightweight agent
@@ -90,11 +90,13 @@ introduced:
   outlive an invocation lives in the S3-backed SQLite file, not in the agent
   process. State the nuance rather than claiming `/tmp` is simply disposable;
   a reader who has finished doc 01 will know better.
-- **Why this is "composable"**: because the agent carries no in-memory state
-  across invocations, any number of these can exist — different schedules,
-  different triggers — as long as they agree on the storage contract, which is
-  exactly what the conditional-write invariant in `10-concurrency.md` already
-  provides.
+- **Why this is "composable"**: because the agent carries no durable in-memory
+  state across invocations, the conditional-write invariant in `10-concurrency.md`
+  is what makes a second agent possible — it prevents two invocations from
+  silently clobbering the S3 object. That protection is scoped to the S3 object:
+  it does not serialize separate Lambda functions, and the pre-publish Bedrock
+  calls and Discord posts are not made idempotent by it. The single-writer queue
+  (rung 4) is the seam that does both.
 
 This rung is the load-bearing one: it makes the doc's central claim concrete
 before generalizing. "Lightweight cloud agent" is not a new abstraction being
@@ -142,15 +144,17 @@ has to be named here rather than appearing for the first time later.
 
 ### 6. Rung 5 — follow-up tasks and the EC2 escape hatch
 
-Closes the ladder. When a sub-agent's work doesn't finish within its own
-invocation, it doesn't retry-loop inside Lambda — it writes a follow-up item
-back to the to-do list (rung 2's table) for the orchestrator to pick up and
-sequence on a later heartbeat. When a task's *nature* is long-running rather
-than just large — something that must hold a connection open, or genuinely
-runs past any reasonable Lambda budget — the same message-queue contract from
-rung 4 lets an EC2 or Fargate worker participate as a peer: it consumes from
-the same queue and emits the same kind of intent. The orchestrator doesn't
-need to know or care which compute produced it.
+Handles work that exceeds a single invocation; rung 6 follows immediately.
+When a sub-agent's work doesn't finish within its own invocation, it doesn't
+retry-loop inside Lambda — it emits an intent describing a follow-up item for
+the to-do list (rung 2's table). The coordinator applies the intent on its
+next drain, and the orchestrator picks the item up on a later heartbeat. When
+a task's *nature* is long-running rather than just large — something that must
+hold a connection open, or genuinely runs past any reasonable Lambda budget
+— the same message-queue contract from rung 4 lets an EC2 or Fargate worker
+participate as a peer: it consumes from the same queue and emits the same
+kind of intent. The orchestrator doesn't need to know or care which compute
+produced it.
 
 ### 7. Rung 6 — tiered memory, a basic knowledge graph, and scoped permissions
 
@@ -161,15 +165,17 @@ answer: [`@equationalapplications/core-llm-wiki`](https://github.com/equationala
 TypeScript memory engine already built for hybrid LLM memory over SQLite. The
 mapping is conceptual, not a dependency this repo takes on:
 
-- **Multi-agent namespacing.** `WikiMemory`'s `entityId` is exactly the
-  identifier a hierarchy of agents needs: each orchestrator, sub-agent, or
-  task line could read/write its own `entityId` namespace, or a coordinator
-  could read across several in one call (`read([entityIdA, entityIdB], …)`).
-- **Tiered memory.** `tierWeights` (e.g. `tier_wisdom`, `tier_fact`,
-  `tier_working`) gives the "central memory" from rung 4 actual tiers —
-  durable curated knowledge weighted high, working/session-scoped context
-  from an in-flight sub-agent weighted low or excluded — instead of one flat
-  fact table.
+- **Multi-agent namespacing.** `WikiMemory`'s `entityId` is the identifier a
+  hierarchy of agents needs: each orchestrator, sub-agent, or task line
+  reads/writes its own `entityId` namespace, or a coordinator reads across
+  several in one call (`read([entityIdA, entityIdB], …)`).
+- **Tiered memory.** `tierWeights` is a per-entity multiplier applied to
+  retrieval scores — a hierarchy can group its entity ids by convention
+  (e.g. `tier_wisdom` for durable curated knowledge, `tier_fact` for
+  established facts, `tier_working` for in-flight sub-agent context) and
+  weight each group as a "tier" without any of those names being built in.
+  `tier_wisdom` / `tier_fact` / `tier_working` are ordinary entity ids; the
+  tiers they denote live in the naming convention and the weight map.
 - **Basic knowledge graph.** The per-entity seeded ontology (`strict` /
   `emergent` / `off` modes, `node_types`/`edge_types`, typed facts with
   inline `edges`) is a lightweight graph layer: intents coming back from
@@ -187,15 +193,16 @@ package as an illustration of what the central memory from rung 4 could look
 like in a fuller form, not a recommendation to adopt it in this tutorial. No
 code or dependency changes are implied.
 
-**Verify before drafting.** This rung cites a lot of external API surface
-(`WikiMemory`, `entityId`, `tierWeights`, the `tier_wisdom`/`tier_fact`/
-`tier_working` tiers, `node_types`/`edge_types`, the `strict`/`emergent`/`off`
-ontology modes, the `read([entityIdA, entityIdB], …)` signature), and the link
-points at repo `expo-llm-wiki` while the package is named
-`@equationalapplications/core-llm-wiki` — plausible for a monorepo, but
-unconfirmed. Fetch that README first and confirm both the URL and every cited
-name. This is the section most likely to have rotted; drop or soften any
-specific that no longer matches rather than guessing.
+**Verification (2026-08-11).** All external API surface cited above —
+`WikiMemory`, `entityId`, `tierWeights`, the `tier_wisdom` / `tier_fact` /
+`tier_working` namespaces, `node_types` / `edge_types`, the `strict` /
+`emergent` / `off` ontology modes, the `read([entityIdA, entityIdB], …)`
+signature — and the repo / package URL (`equationalapplications/expo-llm-wiki`,
+`@equationalapplications/core-llm-wiki`) were verified against the upstream
+README on 2026-08-11, prior to drafting. The implementation plan also records
+the corrected entity-id semantics: `tier_wisdom` / `tier_fact` / `tier_working`
+are ordinary entity ids, with `tierWeights` assigning each a weight. Re-verify
+before relying on any specific that may have rotted since.
 
 ### 8. Closing note
 

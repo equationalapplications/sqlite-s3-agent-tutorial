@@ -1,9 +1,9 @@
 # Composable agents
 
 A **lightweight, composable cloud agent** spins up, works for a few minutes — or a few
-seconds — and goes away. No process stays resident. No state is held in memory between
-runs. Whatever has to outlive one run gets written down somewhere durable before the agent
-exits.
+seconds — and goes away. No process stays resident. The agent carries no state in memory
+that has to outlive an invocation; whatever has to outlive one run gets written down
+somewhere durable before the agent exits.
 
 You already built one. The `fetch` tick in this repo *is* an agent of exactly that shape,
 and the rest of this page is a ladder: rung 1 is the thing you have, and each rung above it
@@ -35,14 +35,20 @@ guarantee is not that `/tmp` is empty; it is that **correctness never depends on
 in it.** Everything that must outlive an invocation lives in the S3 object, and the local
 file is a cache a cold start is free to throw away.
 
-**Why "composable."** Because no state is carried in the agent process, there is nothing
-to coordinate except the storage. Any number of these can exist — different schedules,
-different triggers, different jobs — provided they agree on the storage contract. This
-repo's contract is the conditional write on the S3 object described in
-[docs/10-concurrency.md](10-concurrency.md), backed at the platform layer by
-`reservedConcurrentExecutions: 1` — belt and suspenders, as
-[docs/01-architecture.md](01-architecture.md) puts it. That contract, not any shared
-runtime, is what makes a second agent possible.
+**Why "composable."** Because no durable state is carried in the agent process, there is
+nothing to coordinate except the storage. The conditional write on the S3 object described
+in [docs/10-concurrency.md](10-concurrency.md) is what makes a second agent possible —
+without it, two invocations landing at once would silently clobber each other.
+
+That protection is scoped to the S3 object. The conditional write stops the file from
+being corrupted; it does not serialize separate Lambda functions, and the pre-publish
+Bedrock calls and Discord posts are not made idempotent by it. Two agents running the same
+job at once can still post the same Discord message twice before either write commits —
+that is the duplicate-side-effect hazard rung 4's queue exists to eliminate.
+
+This repo's `reservedConcurrentExecutions: 1` is the tutorial default, function-scoped and
+overridable via `RESERVED_CONCURRENCY`. It is a second line of defense, not a general
+multi-agent coordination primitive.
 
 This is the load-bearing rung. "Lightweight cloud agent" is not an abstraction being
 introduced — it is a name for the thing already running on your schedule.
@@ -119,10 +125,12 @@ Two things would break the ladder if left unaddressed, and both are answered by 
 already on it.
 
 **Work that doesn't finish.** A sub-agent approaching its timeout does not retry-loop
-inside Lambda, and does not silently drop what it was doing. It writes a **follow-up
-item** back to the to-do list from rung 2 — "resume from here" — and exits cleanly. The
-orchestrator picks it up on a later heartbeat and sequences it like any other item.
-Progress is durable because it was written down, not because a process stayed alive.
+inside Lambda, and does not silently drop what it was doing. It emits an **intent**
+describing a **follow-up item** for the to-do list from rung 2 — "resume from here" —
+and exits cleanly. The coordinator applies the intent on its next drain, the follow-up
+shows up in the to-do list like any other item, and the orchestrator picks it up on a
+later heartbeat. Progress is durable because it was written down through the same queue
+rung 4 already defines, not because a process stayed alive.
 
 **Work that is long-running by nature.** Some tasks are not merely large: they hold a
 connection open, or stream for an hour, or genuinely run past any Lambda budget you could
