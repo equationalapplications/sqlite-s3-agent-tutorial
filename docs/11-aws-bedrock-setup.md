@@ -235,3 +235,83 @@ terminal. Map what you get to [Troubleshooting](#troubleshooting) below before m
 > `anthropic.claude-*` defaults to `global.`. The code adds the right prefix itself and
 > throws at startup if you configure an id that already carries one. Never hand-edit a
 > prefix onto `BEDROCK_MODEL_ID`.
+
+## Step 7: Deploy
+
+Two environment variables are read at **synth** time, which means they must be set
+before `npm run deploy`, not after:
+
+- `DISCORD_WEBHOOK_URL` — required. `infra/stack.ts` throws without it.
+- `FETCH_TRIGGER_TOKEN` — optional, and only needed if you want the on-demand trigger
+  in Step 9. **Set it now if you want it at all** — adding it later means another
+  deploy.
+
+```bash
+export AWS_PROFILE=your-profile          # defaults to `default`
+export AWS_REGION=us-east-1              # scripts/deploy.sh reads this
+
+# Source secrets from an untracked file rather than echoing them inline.
+set -a; . ./.env.discord; set +a         # .env.discord is gitignored
+export FETCH_TRIGGER_TOKEN="$(openssl rand -hex 24)"   # optional — see Step 9
+
+npm run deploy
+```
+
+`npm run deploy` bootstraps (Step 3), builds the TypeScript, builds and pushes the
+container image, and deploys the `SqliteS3AgentTutorial` stack. Success looks like four
+stack outputs:
+
+```
+SqliteS3AgentTutorial.AgentFunctionName = ...
+SqliteS3AgentTutorial.AgentFunctionUrl  = https://....lambda-url.us-east-1.on.aws/
+SqliteS3AgentTutorial.LoopRuleName      = ...
+SqliteS3AgentTutorial.SnapshotBucketName = ...
+```
+
+If it fails, the CloudFormation event log names the exact denied action or failed
+resource:
+
+```bash
+aws cloudformation describe-stack-events \
+  --stack-name SqliteS3AgentTutorial --region us-east-1 --max-items 20 \
+  --query "StackEvents[?ResourceStatus=='CREATE_FAILED'].[LogicalResourceId,ResourceStatusReason]" \
+  --output table
+```
+
+> **The schedule starts immediately.** The stack declares its EventBridge rule
+> `enabled: true`, so the bot begins ticking every 5 minutes as soon as the deploy
+> finishes. Run `npm run loop-stop` when you're done experimenting — see the README's
+> Loop mode section and [07-budget-protection.md](07-budget-protection.md).
+
+## Step 8: Verify the deployment
+
+```bash
+npm run smoke
+```
+
+This probes the status Function URL twice: once unsigned (expecting `403`, proving the
+URL really does require IAM) and once SigV4-signed (expecting the status payload). It is
+read-only and safe to run at any time, including mid-tick.
+
+It deliberately does **not** call Bedrock, post to Discord, or write to S3 — so a
+passing smoke run proves the deployment and its IAM are sound, and proves nothing at all
+about your model access. Step 6 was that check; Step 9 is the end-to-end one.
+
+## Step 9 (optional): Trigger a real fetch end-to-end
+
+The scheduled run does this every 5 minutes on its own — but if you'd rather not wait,
+and you set `FETCH_TRIGGER_TOKEN` before deploying in Step 7, you can trigger one over
+HTTP. The request needs **both** a valid token and SigV4 signing with a same-account
+principal; the full signed `curl` is in the README's *Triggering a fetch on demand*
+section and is not repeated here.
+
+A successful trigger exercises the entire pipeline: Lambda cold start → hydrate the
+SQLite snapshot from S3 → fetch weather and crypto → Bedrock Converse for the message
+and haiku → Titan embedding → conditional write back to S3 → Discord post. Within a few
+seconds you should see a message in your Discord channel.
+
+If you skipped `FETCH_TRIGGER_TOKEN` at deploy time, either wait up to 5 minutes for the
+scheduled tick or redeploy with the variable set. If the trigger returns `403`, that is
+the token or the signature — not Bedrock. Bedrock problems show up as a tick that runs
+and posts nothing; check the Lambda's CloudWatch logs and match the exception against
+[Troubleshooting](#troubleshooting).
