@@ -13,8 +13,10 @@ minutes (or seconds) of work, and goes away. The doc is conceptual only. It adds
 no code, no new infrastructure, and no new tables to this repo. Its job is to
 name a pattern the reader has already built, then walk it — rung by rung — toward
 the fuller shape that pattern can take: a to-do list, delegated sub-agents,
-hierarchy, intents flowing back through a message queue, follow-up tasks, and an
-EC2/Fargate escape hatch for genuinely long-running work.
+hierarchy, intents flowing back through a message queue, follow-up tasks, an
+EC2/Fargate escape hatch for genuinely long-running work, and — as an
+illustrative extension — a tiered, ontology-aware "central memory" with
+scoped, multi-agent permissions.
 
 This is documentation-only work. No implementation plan beyond writing the page
 itself is expected; `writing-plans` here produces a short plan for drafting and
@@ -122,12 +124,48 @@ rung 4 lets an EC2 or Fargate worker participate as a peer: it consumes from
 the same queue and emits the same kind of intent. The orchestrator doesn't
 need to know or care which compute produced it.
 
-### 7. Closing note
+### 7. Rung 6 — tiered memory, a basic knowledge graph, and scoped permissions
 
-Short closing paragraph: this repo implements rung 1 only. Rungs 2–5 are
-conceptual. Points the reader to `10-concurrency.md` (single-writer queue) and
-`05-from-tutorial-to-prod.md` (exits from SQLite-on-S3) as the docs to read
-next for the concrete pieces a real implementation would draw on.
+Rung 4 named "central memory" as the thing a coordinator writes intents into,
+without saying what that memory is shaped like. This rung points to a concrete
+answer: [`@equationalapplications/core-llm-wiki`](https://github.com/equationalapplications/expo-llm-wiki/blob/main/packages/core/README.md)
+(specifically `packages/core/README.md` in that repo), a platform-agnostic
+TypeScript memory engine already built for hybrid LLM memory over SQLite. The
+mapping is conceptual, not a dependency this repo takes on:
+
+- **Multi-agent namespacing.** `WikiMemory`'s `entityId` is exactly the
+  identifier a hierarchy of agents needs: each orchestrator, sub-agent, or
+  task line could read/write its own `entityId` namespace, or a coordinator
+  could read across several in one call (`read([entityIdA, entityIdB], …)`).
+- **Tiered memory.** `tierWeights` (e.g. `tier_wisdom`, `tier_fact`,
+  `tier_working`) gives the "central memory" from rung 4 actual tiers —
+  durable curated knowledge weighted high, working/session-scoped context
+  from an in-flight sub-agent weighted low or excluded — instead of one flat
+  fact table.
+- **Basic knowledge graph.** The per-entity seeded ontology (`strict` /
+  `emergent` / `off` modes, `node_types`/`edge_types`, typed facts with
+  inline `edges`) is a lightweight graph layer: intents coming back from
+  sub-agents can carry typed relationships (e.g. `task --produced_by-->
+  sub_agent_run`) rather than opaque text blobs.
+- **Scoped permissions.** Because retrieval and writes are already
+  partitioned by `entityId`, restricting a given sub-agent's coordinator
+  access to specific entity namespaces (or specific tiers within one) is a
+  natural enforcement point for "this sub-agent may only see/write its own
+  scope" — the same boundary a hierarchy needs to keep a low-trust leaf agent
+  from reading or corrupting a sibling's or the orchestrator's memory.
+
+This rung is explicitly the most speculative: it names a specific external
+package as an illustration of what a fuller "central memory" could look like,
+not a recommendation to adopt it in this tutorial. No code or dependency
+changes are implied.
+
+### 8. Closing note
+
+Short closing paragraph: this repo implements rung 1 only. Rungs 2–6 are
+conceptual. Points the reader to `10-concurrency.md` (single-writer queue),
+`05-from-tutorial-to-prod.md` (exits from SQLite-on-S3), and
+`core-llm-wiki`'s README (tiered memory, ontology, scoped permissions) as the
+docs to read next for the concrete pieces a real implementation would draw on.
 
 ## Non-goals
 
