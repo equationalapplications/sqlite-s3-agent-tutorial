@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved — ready for writing-plans.
+Implemented — `docs/12-composable-agents.md`.
 
 ## Summary
 
