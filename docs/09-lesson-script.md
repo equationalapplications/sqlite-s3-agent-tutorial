@@ -2,7 +2,7 @@
 
 **Audience:** a teacher walking a student through the RAG extension.
 **Length:** 10 lessons, roughly 30 minutes including the closing test run.
-**Prerequisite:** the student has read [08-rag-vector-search.md](08-rag-vector-search.md) and the base tutorial's [01-architecture.md](01-architecture.md). Familiarity with the writer/reader asymmetry in [01-architecture.md](01-architecture.md) and the per-source error isolation in [03-schema.md](03-schema.md) is assumed.
+**Prerequisite:** the student has completed the base tutorial end-to-end, including the AWS setup in [11-aws-bedrock-setup.md](11-aws-bedrock-setup.md) — the RAG lesson assumes a deployed, working bot, and that doc is where to go if the base deploy is broken. The student has read [08-rag-vector-search.md](08-rag-vector-search.md) and the base tutorial's [01-architecture.md](01-architecture.md). Familiarity with the writer/reader asymmetry in [01-architecture.md](01-architecture.md) and the per-source error isolation in [03-schema.md](03-schema.md) is assumed.
 
 ## How to use this script
 
