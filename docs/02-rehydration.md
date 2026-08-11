@@ -96,24 +96,3 @@ redeploy. At the AWS cap the same math gives roughly 2.6 million ticks of headro
 about 25 years at 5-minute cadence. The RAG corpus (`agent_notifications` +
 `agent_embeddings`) is the dominant growth term; status reads and `agent_runs` rows are
 small by comparison.
-
-## Bedrock setup
-
-Before the first `fetch` invocation can succeed, the deploying account in `us-east-1` needs
-two things: an active AWS Marketplace subscription for the configured `bedrockModelId`
-(default `zai.glm-4.7-flash`), and an IAM policy that grants `bedrock:InvokeModel` against
-it. Bedrock enables foundation-model access by default in commercial Regions once the
-Marketplace subscription is in place — the legacy manual *Bedrock → Model access* console
-flow is no longer the gating step for this model. If you point `bedrockModelId` at an
-Anthropic model instead, Bedrock requires a separate first-time-use EULA acceptance on the
-same page before that model will invoke; that step *is* still a manual console action and
-is the one remaining reason to open the *Model access* screen.
-
-The CDK stack's IAM policy is generated at synth time from the configured model's family
-(see `src/format/families.ts`) and is permissive enough to invoke the chosen model — but a
-Marketplace subscription must already exist on the account, or `bedrock:InvokeModel`
-returns `AccessDeniedException` regardless of what the IAM policy says. `cdk deploy` does
-not check for the subscription, so the stack deploys cleanly and the first `fetch` fails —
-which is why this tutorial calls it out before the first deploy rather than after.
-
-For Discord webhook setup, see [docs/06-discord-webhook-setup.md](06-discord-webhook-setup.md).
