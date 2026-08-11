@@ -94,9 +94,9 @@ introduced:
   state across invocations, the conditional-write invariant in `10-concurrency.md`
   is what makes a second agent possible — it prevents two invocations from
   silently clobbering the S3 object. That protection is scoped to the S3 object:
-  it does not serialize separate Lambda functions, and the pre-publish Bedrock
-  calls and Discord posts are not made idempotent by it. The single-writer queue
-  (rung 4) is the seam that does both.
+  it does not serialize separate Lambda functions, and any side-effecting
+  operations the agent performs before the write are not made idempotent by it.
+  The single-writer queue (rung 4) is the seam that does both.
 
 This rung is the load-bearing one: it makes the doc's central claim concrete
 before generalizing. "Lightweight cloud agent" is not a new abstraction being

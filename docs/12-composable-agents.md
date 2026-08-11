@@ -41,10 +41,11 @@ in [docs/10-concurrency.md](10-concurrency.md) is what makes a second agent poss
 without it, two invocations landing at once would silently clobber each other.
 
 That protection is scoped to the S3 object. The conditional write stops the file from
-being corrupted; it does not serialize separate Lambda functions, and the pre-publish
-Bedrock calls and Discord posts are not made idempotent by it. Two agents running the same
-job at once can still post the same Discord message twice before either write commits —
-that is the duplicate-side-effect hazard rung 4's queue exists to eliminate.
+being corrupted; it does not serialize separate Lambda functions, and any side-effecting
+operations the agent performs before the write — outbound notifications, downstream API
+calls — are not made idempotent by it. Two agents running the same job at once can still
+fire those side effects twice before either write commits. That is the duplicate-side-
+effect hazard rung 4's queue exists to eliminate.
 
 This repo's `reservedConcurrentExecutions: 1` is the tutorial default, function-scoped and
 overridable via `RESERVED_CONCURRENCY`. It is a second line of defense, not a general
