@@ -133,3 +133,105 @@ will skip straight to your stack. `ValidationError … does not exist` means the
 need the CloudFormation, S3, ECR, SSM, and `iam:CreateRole` permissions from Step 2.
 Most first-run `AccessDenied` failures land here rather than on the tutorial's own
 resources.
+
+## Step 4: Subscribe to the model in AWS Marketplace
+
+This is the console-only step, and it is the one people get wrong.
+
+1. Open the [AWS Marketplace](https://aws.amazon.com/marketplace) console in the same
+   account you authenticated in Step 0, and search for the model — `GLM-4.7-Flash` for
+   this tutorial's default.
+2. Open the listing and click **View purchase options** / **Subscribe**.
+3. Accept the terms. **Subscribing costs nothing.** There is no minimum, no monthly
+   fee, and no commitment — you pay per token consumed, billed through your normal AWS
+   invoice alongside Lambda and S3.
+4. Wait for the subscription status to show as active. It is usually immediate but can
+   take a few minutes.
+
+> **Subscribe on AWS Marketplace, not on the vendor's own site.** The model vendor
+> (for the default model, `zai.com`) sells its own API plans, some with minimum spends.
+> Those are a different product with different credentials, and they will not make
+> `bedrock:InvokeModel` work. What this tutorial needs is the AWS Marketplace listing,
+> reached from the AWS console, billed to your AWS account.
+
+The subscription is **per Region**. Subscribing while your console is in `us-east-1` is
+what the rest of this doc assumes.
+
+## Step 5: Confirm access to both models this tutorial invokes
+
+There are two, and readers regularly arrange access for only the first:
+
+| Model | Configurable? | Used for |
+|---|---|---|
+| `zai.glm-4.7-flash` (default) | Yes — `BEDROCK_MODEL_ID` (`src/config.ts:114`) | The friendly message + haiku, via Converse |
+| `amazon.titan-embed-text-v2:0` | **No** — hardcoded at `src/embed/titan.ts:16` | Embedding each tick's message for RAG search |
+
+Every tick calls both. Verify each is visible to your account:
+
+```bash
+# The chat model — Marketplace subscription from Step 4 is what gates this one.
+aws bedrock get-foundation-model --region us-east-1 \
+  --model-identifier zai.glm-4.7-flash \
+  --query "modelDetails.modelId" --output text
+
+# The embedding model — Amazon-family access, a separate gate.
+aws bedrock get-foundation-model --region us-east-1 \
+  --model-identifier amazon.titan-embed-text-v2:0 \
+  --query "modelDetails.modelId" --output text
+```
+
+Both should echo the id back. What to do per family if one doesn't:
+
+- **`zai.*`** — nothing to click. The Marketplace subscription from Step 4 is the gate;
+  Bedrock enables foundation-model access by default in commercial Regions once the
+  subscription is in place, and the legacy manual *Bedrock → Model access* console flow
+  is no longer the gating step for this model. A failure here means Step 4 didn't take,
+  or took in a different Region.
+- **`amazon.titan-*`** — Amazon-family models are enabled by default in most commercial
+  Region accounts, but not universally. If the probe fails, open **Bedrock → Model
+  access** in `us-east-1` and enable Titan Text Embeddings V2 there.
+- **`anthropic.claude-*`** — only relevant if you switch the default. Anthropic models
+  require a per-model first-time-use EULA acceptance on the **Model access** page before
+  the first `InvokeModel` succeeds. That is a manual console action and is the one
+  remaining reason to open that screen. It does **not** apply to the default model.
+
+## Step 6: Prove Bedrock works before you deploy
+
+One real model call, costing a fraction of a cent, tells you whether Steps 1, 4, and 5
+actually landed:
+
+```bash
+# Should return JSON containing an assistant message.
+aws bedrock-runtime converse \
+  --region us-east-1 \
+  --model-id zai.glm-4.7-flash \
+  --messages '[{"role":"user","content":[{"text":"Reply with the single word: ok"}]}]' \
+  --query "output.message.content[0].text" --output text
+```
+
+And the embedding model:
+
+```bash
+# Should write a JSON body containing a 1024-float "embedding" array.
+aws bedrock-runtime invoke-model \
+  --region us-east-1 \
+  --model-id amazon.titan-embed-text-v2:0 \
+  --content-type application/json \
+  --cli-binary-format raw-in-base64-out \
+  --body '{"inputText":"hello"}' \
+  /tmp/titan-probe.json && head -c 80 /tmp/titan-probe.json && echo
+```
+
+**Why this step exists.** Without it, the first real Bedrock call happens inside a
+deployed Lambda at Step 9, which means every subscription, EULA, Region, or model-id
+mistake costs a full bootstrap-and-deploy cycle to discover and a CloudWatch log dive to
+diagnose. Here the same mistakes surface in two seconds with the error text on your own
+terminal. Map what you get to [Troubleshooting](#troubleshooting) below before moving on
+— a failure at this step will not fix itself during deployment.
+
+> **Note on the model id.** Pass the **bare** id, exactly as above. Bedrock inference
+> profile prefixes (`global.`, `us.`) are decided per model family by
+> `src/format/families.ts` — the `zai.*` family accepts the bare id only, while
+> `anthropic.claude-*` defaults to `global.`. The code adds the right prefix itself and
+> throws at startup if you configure an id that already carries one. Never hand-edit a
+> prefix onto `BEDROCK_MODEL_ID`.
