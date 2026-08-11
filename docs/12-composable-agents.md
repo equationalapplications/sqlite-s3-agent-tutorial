@@ -47,3 +47,48 @@ what makes a second agent possible.
 
 This is the load-bearing rung. "Lightweight cloud agent" is not an abstraction being
 introduced — it is a name for the thing already running on your schedule.
+
+## Rung 2: a to-do list instead of one fixed job
+
+> **Not implemented in this repo.** Conceptual from here on.
+
+Today the job is hardcoded: every heartbeat does the same fetch, because the fetch *is*
+the schedule's payload. An agent that only ever does one thing does not need to be told
+what to do.
+
+The first generalization is to stop hardcoding it. Give the agent a **to-do list** — a
+table of pending work items, each with enough to decide whether it is due — and the loop
+becomes: wake on heartbeat, read the list, decide what is due, act. The heartbeat stops
+meaning "do the fetch" and starts meaning "check whether there is anything to do."
+
+The natural home for that table is the same SQLite file the agent already hydrates, which
+keeps the one-file philosophy from [docs/01-architecture.md](01-architecture.md) intact —
+the work queue and the work product live in the same object, committed by the same
+conditional write. Nothing new has to exist for this rung; it is a table and a `WHERE`
+clause.
+
+At this rung the agent that reads the list is also the agent that does the work. That is
+the constraint rung 3 removes.
+
+## Rung 3: delegation and hierarchy
+
+> **Not implemented in this repo.**
+
+Instead of doing a to-do item itself, the agent invokes another Lambda scoped to that one
+item, and moves on. The first agent becomes an **orchestrator**: its job is deciding what
+runs, not running it. The invoked one is a **sub-agent**.
+
+This is recursive, not one level of fan-out. A sub-agent handed "summarize this week's
+readings" can decide that is still too big, split it into seven days, and invoke seven
+sub-agents of its own. Depth is a property of the work, not of the topology.
+
+The forcing constraint is Lambda's roughly 15-minute runtime ceiling. Any unit of work
+that might exceed it cannot be done inline — it has to be decomposable into pieces that
+each fit, or moved off Lambda entirely (rung 5). Delegation is not primarily an elegance
+argument; it is how work outgrows a single invocation without outgrowing the platform.
+
+One thing delegation does **not** change: the single-writer invariant from
+[docs/10-concurrency.md](10-concurrency.md). Fanning out multiplies *invocations*, not
+*writers*. Sub-agents do not each get their own conditional write to the shared S3 object
+— thirty agents contending on one ETag is the failure mode that doc describes, not a
+design. Where their results actually go is rung 4.
