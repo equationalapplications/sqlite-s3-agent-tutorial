@@ -6,21 +6,30 @@ needs before `npm run deploy` produces a working bot. The Discord half is
 bottom of [02-rehydration.md](02-rehydration.md), which was the wrong home — account
 setup and rehydration are different topics, read at different moments.
 
-Every step below except Step 4 can be verified from the AWS CLI, which means you can
-hand most of this to an AI assistant that has CLI access rather than clicking through
-consoles. A prompt that works:
+Most AWS-side steps can be verified from the AWS CLI, which means you can hand
+most of this to an AI assistant that has CLI access rather than clicking through
+consoles. Step 0's local checks (`aws sts get-caller-identity`, `docker info`,
+`npm test`) and the billing check in **Billing and Cost Management → Payment
+preferences** are not AWS CLI checks — handle those yourself or read along. A
+prompt that works:
 
-```
+```text
 I'm setting up the sqlite-s3-agent-tutorial on a fresh AWS account. Walk me
 through docs/11-aws-bedrock-setup.md using the AWS CLI in us-east-1: run each
 step's verification command, tell me what the output means, and stop at the
 first failure rather than continuing. Show me any command that creates,
-subscribes to, or grants something before you run it.
+subscribes to, or grants something before you run it. Do not run any IAM,
+Marketplace, or write-API command without showing it to me first.
 ```
 
-> **Step 4 is the exception.** Subscribing to a model in AWS Marketplace has no
-> CLI equivalent you can rely on — it is a console flow with a legal agreement.
-> Expect to do that one yourself.
+> **Step 4 is mostly the exception.** The AWS Marketplace listing is a console
+> flow with a legal agreement, but the underlying Bedrock model agreement can
+> also be created from the CLI (`aws bedrock create-foundation-model-agreement`)
+> or accepted implicitly on the model's first invocation. The first-invocation
+> path needs `aws-marketplace:Subscribe`, `aws-marketplace:Unsubscribe`, and
+> `aws-marketplace:ViewSubscriptions` on the invoking identity and can take up
+> to 15 minutes to finalise; a click-through in the console has the same effect
+> and is the route most readers should take. Expect to do this step yourself.
 
 ## Step 0: Local prerequisites
 
@@ -43,7 +52,7 @@ before continuing. Every other command in this doc assumes it works.
 docker info
 ```
 
-The tutorial's Lambda is a **container image** function (`infra/stack.ts:84` uses
+The tutorial's Lambda is a **container image** function (`infra/stack.ts:84-85` uses
 `lambda.DockerImageFunction` with `DockerImageCode.fromImageAsset`), so `cdk deploy`
 builds the image locally and pushes it to ECR. Without a running daemon the deploy
 fails with a Docker error that mentions neither Bedrock nor this tutorial, which is a
@@ -73,9 +82,9 @@ Read the result:
 | Output | Meaning | What to do |
 |---|---|---|
 | One or more `zai.glm-…` ids | Bedrock is reachable and the model exists in the Region | Continue to Step 2 |
-| Empty output, command succeeds | Bedrock answered, but this model family isn't offered to your account/Region | Try `--region us-east-1` explicitly; if still empty, see [bedrock-model-comparison.md](bedrock-model-comparison.md) and pick a model your account does list |
+| Empty output, command succeeds | Bedrock answered, but this model family isn't offered to your account/Region | See [bedrock-model-comparison.md](bedrock-model-comparison.md) and pick a model your account does list; the model must also be available in the Region you queried |
 | `AccessDeniedException` | Your principal lacks `bedrock:ListFoundationModels` | Step 2 — this is an IAM problem, not a Bedrock one |
-| `Could not connect to the endpoint URL` | Bedrock is not available in the Region you asked for | Use `us-east-1` |
+| `Could not connect to the endpoint URL` | Bedrock is not available in the Region you asked for | Your account lacks Bedrock in this Region (Lightsail-only, restricted Region, or SCP-blocked); see the note below |
 
 Some account types — accounts that have only ever used Lightsail, accounts in
 restricted Regions, some organisation-managed accounts with service control policies —
@@ -91,7 +100,7 @@ and nothing else). A brand-new IAM user typically has none of what a CDK deploy 
 
 The deploy touches, at minimum:
 
-```
+```text
 iam:CreateRole, iam:AttachRolePolicy, iam:PassRole
 lambda:CreateFunction, lambda:UpdateFunctionCode, lambda:CreateFunctionUrlConfig
 s3:CreateBucket, s3:PutBucketPolicy, s3:PutBucketTagging
@@ -102,14 +111,22 @@ ecr:CreateRepository, ecr:GetAuthorizationToken,
 cloudformation:CreateStack, cloudformation:UpdateStack, cloudformation:DeleteStack
 sts:AssumeRole            (the CDK bootstrap deploy roles — see Step 3)
 ssm:GetParameter          (CDK bootstrap version lookup)
+
+# Required only if this same principal performs Step 4's Marketplace subscribe
+# or the first third-party model invocation (automatic subscription path):
+aws-marketplace:Subscribe, aws-marketplace:Unsubscribe,
+aws-marketplace:ViewSubscriptions
 ```
 
 > **Treat that list as representative, not exhaustive.** CDK's exact call set shifts
 > between versions, and an incomplete list presented as "the minimum" is worse than no
-> list — it sends you hunting one denied action at a time. The pragmatic path is
-> `AdministratorAccess` on a dedicated deploy principal for the first deploy, then
-> scoping down once you can see in CloudTrail what was actually called. Enumerating a
-> least-privilege deploy policy is out of scope for this tutorial.
+> list — it sends you hunting one denied action at a time. The pragmatic path is a
+> short-lived deployer role for the first deploy (a fresh IAM user with
+> `AdministratorAccess` works; rotate or delete it after the first successful deploy),
+> then scoping down once you can see in CloudTrail what was actually called. If
+> least-privilege scoping must wait, label the `AdministratorAccess` usage as a
+> temporary exception rather than the steady state. Enumerating a least-privilege
+> deploy policy is out of scope for this tutorial.
 
 ## Step 3: Know what the first deploy bootstraps
 
@@ -154,8 +171,29 @@ This is the console-only step, and it is the one people get wrong.
 > `bedrock:InvokeModel` work. What this tutorial needs is the AWS Marketplace listing,
 > reached from the AWS console, billed to your AWS account.
 
-The subscription is **per Region**. Subscribing while your console is in `us-east-1` is
-what the rest of this doc assumes.
+After subscribing in one Region, the same identity can request access to the model in
+any other Region where that model is supported — the Marketplace subscription itself
+is **not** per Region. What is per Region is *model availability*: re-running Step 1's
+`list-foundation-models` in a new Region is the only way to confirm that a model exists
+there before you move. Subscribing in `us-east-1` (this doc's pinned Region) is what
+the rest of the steps assume.
+
+> **CLI alternative for Step 4.** You can also create the Bedrock model agreement
+> directly without visiting the Marketplace listing:
+>
+> ```bash
+> aws bedrock list-foundation-model-agreement-offers \
+>   --region us-east-1 --model-id zai.glm-4.7-flash
+>
+> aws bedrock create-foundation-model-agreement \
+>   --region us-east-1 \
+>   --model-id zai.glm-4.7-flash \
+>   --offer-token "<token from the previous command>"
+> ```
+>
+> Or rely on the implicit first-invocation subscription, which Bedrock performs in the
+> background if the invoking identity carries the three `aws-marketplace:*` permissions
+> from Step 2 — that path can take up to 15 minutes to finalise.
 
 ## Step 5: Confirm access to both models this tutorial invokes
 
@@ -166,21 +204,24 @@ There are two, and readers regularly arrange access for only the first:
 | `zai.glm-4.7-flash` (default) | Yes — `BEDROCK_MODEL_ID` (`src/config.ts:114`) | The friendly message + haiku, via Converse |
 | `amazon.titan-embed-text-v2:0` | **No** — hardcoded at `src/embed/titan.ts:16` | Embedding each tick's message for RAG search |
 
-Every tick calls both. Verify each is visible to your account:
+Every tick calls both. `get-foundation-model` only returns metadata — to confirm your
+account is actually authorised to invoke each model, use
+`get-foundation-model-availability` and inspect `authorizationStatus`,
+`agreementAvailability.status`, `entitlementAvailability`, and
+`regionAvailability`:
 
 ```bash
 # The chat model — Marketplace subscription from Step 4 is what gates this one.
-aws bedrock get-foundation-model --region us-east-1 \
-  --model-identifier zai.glm-4.7-flash \
-  --query "modelDetails.modelId" --output text
+aws bedrock get-foundation-model-availability --region us-east-1 \
+  --model-id zai.glm-4.7-flash
 
 # The embedding model — Amazon-family access, a separate gate.
-aws bedrock get-foundation-model --region us-east-1 \
-  --model-identifier amazon.titan-embed-text-v2:0 \
-  --query "modelDetails.modelId" --output text
+aws bedrock get-foundation-model-availability --region us-east-1 \
+  --model-id amazon.titan-embed-text-v2:0
 ```
 
-Both should echo the id back. What to do per family if one doesn't:
+For each model, every field must come back `AVAILABLE` / `AUTHORIZED`. What to do per
+family if one doesn't:
 
 - **`zai.*`** — nothing to click. The Marketplace subscription from Step 4 is the gate;
   Bedrock enables foundation-model access by default in commercial Regions once the
@@ -188,12 +229,14 @@ Both should echo the id back. What to do per family if one doesn't:
   is no longer the gating step for this model. A failure here means Step 4 didn't take,
   or took in a different Region.
 - **`amazon.titan-*`** — Amazon-family models are enabled by default in most commercial
-  Region accounts, but not universally. If the probe fails, open **Bedrock → Model
-  access** in `us-east-1` and enable Titan Text Embeddings V2 there.
+  Region accounts, but not universally. If `agreementAvailability.status` is
+  `NOT_AVAILABLE`, open **Bedrock → Model access** in `us-east-1` and enable Titan Text
+  Embeddings V2 there.
 - **`anthropic.claude-*`** — only relevant if you switch the default. Anthropic models
-  require a per-model first-time-use EULA acceptance on the **Model access** page before
-  the first `InvokeModel` succeeds. That is a manual console action and is the one
-  remaining reason to open that screen. It does **not** apply to the default model.
+  require a First Time Use submission (use-case description and a website URL) on the
+  **Model access** page, or via the `PutUseCaseForModelAccess` API, before the first
+  `InvokeModel` succeeds. That is a manual one-time action and is the one remaining
+  reason to open that screen. It does **not** apply to the default model.
 
 ## Step 6: Prove Bedrock works before you deploy
 
@@ -201,7 +244,7 @@ One real model call, costing a fraction of a cent, tells you whether Steps 1, 4,
 actually landed:
 
 ```bash
-# Should return JSON containing an assistant message.
+# Should print the model's reply — a single token, e.g. `ok`.
 aws bedrock-runtime converse \
   --region us-east-1 \
   --model-id zai.glm-4.7-flash \
@@ -212,22 +255,24 @@ aws bedrock-runtime converse \
 And the embedding model:
 
 ```bash
-# Should write a JSON body containing a 1024-float "embedding" array.
+# Should write a JSON body containing a 256-float "embedding" array —
+# matching the dimensions the deployed code requests (`src/embed/titan.ts:17`).
 aws bedrock-runtime invoke-model \
   --region us-east-1 \
   --model-id amazon.titan-embed-text-v2:0 \
   --content-type application/json \
   --cli-binary-format raw-in-base64-out \
-  --body '{"inputText":"hello"}' \
+  --body '{"inputText":"hello","dimensions":256,"normalize":true}' \
   /tmp/titan-probe.json && head -c 80 /tmp/titan-probe.json && echo
 ```
 
 **Why this step exists.** Without it, the first real Bedrock call happens inside a
 deployed Lambda at Step 9, which means every subscription, EULA, Region, or model-id
-mistake costs a full bootstrap-and-deploy cycle to discover and a CloudWatch log dive to
-diagnose. Here the same mistakes surface in two seconds with the error text on your own
-terminal. Map what you get to [Troubleshooting](#troubleshooting) below before moving on
-— a failure at this step will not fix itself during deployment.
+mistake surfaces only at the next scheduled tick — up to five minutes of waiting, then a
+CloudWatch log dive to read the actual error. The deploy itself succeeds either way; the
+probe catches the same mistakes in two seconds with the error text on your own terminal.
+Map what you get to [Troubleshooting](#troubleshooting) below before moving on — a failure
+at this step will not fix itself during deployment.
 
 > **Note on the model id.** Pass the **bare** id, exactly as above. Bedrock inference
 > profile prefixes (`global.`, `us.`) are decided per model family by
@@ -238,13 +283,17 @@ terminal. Map what you get to [Troubleshooting](#troubleshooting) below before m
 
 ## Step 7: Deploy
 
-Two environment variables are read at **synth** time, which means they must be set
+Three environment variables are read at **synth** time, which means they must be set
 before `npm run deploy`, not after:
 
 - `DISCORD_WEBHOOK_URL` — required. `infra/stack.ts` throws without it.
 - `FETCH_TRIGGER_TOKEN` — optional, and only needed if you want the on-demand trigger
   in Step 9. **Set it now if you want it at all** — adding it later means another
   deploy.
+- `BEDROCK_MODEL_ID` — optional. Leaving it unset keeps the default
+  (`zai.glm-4.7-flash`, resolved at runtime by `src/config.ts:114`); setting it
+  before deploy changes the model baked into the IAM policy the Lambda runs under,
+  so a new value needs a redeploy to take effect.
 
 ```bash
 export AWS_PROFILE=your-profile          # defaults to `default`
@@ -261,7 +310,7 @@ npm run deploy
 container image, and deploys the `SqliteS3AgentTutorial` stack. Success looks like four
 stack outputs:
 
-```
+```text
 SqliteS3AgentTutorial.AgentFunctionName = ...
 SqliteS3AgentTutorial.AgentFunctionUrl  = https://....lambda-url.us-east-1.on.aws/
 SqliteS3AgentTutorial.LoopRuleName      = ...
@@ -293,6 +342,12 @@ This probes the status Function URL twice: once unsigned (expecting `403`, provi
 URL really does require IAM) and once SigV4-signed (expecting the status payload). It is
 read-only and safe to run at any time, including mid-tick.
 
+The Function URL is `AWS_IAM`-protected, so callers must SigV4-sign the request and
+carry both `lambda:InvokeFunctionUrl` and `lambda:InvokeFunction` permissions on the
+caller's principal. An IAM denial at the Function URL boundary returns `403` *before*
+`FETCH_TRIGGER_TOKEN` is even read; a `403` after IAM is authorised means the token is
+missing or wrong, not that Bedrock is unreachable.
+
 It deliberately does **not** call Bedrock, post to Discord, or write to S3 — so a
 passing smoke run proves the deployment and its IAM are sound, and proves nothing at all
 about your model access. Step 6 was that check; Step 9 is the end-to-end one.
@@ -318,11 +373,11 @@ and posts nothing; check the Lambda's CloudWatch logs and match the exception ag
 
 ---
 
-# Reference
+## Reference
 
 Everything above is the procedure. What follows is the material you come back for.
 
-## Region availability
+### Region availability
 
 The procedure pins `us-east-1`. If you move:
 
@@ -341,14 +396,15 @@ The procedure pins `us-east-1`. If you move:
 - **Bootstrap is per account *and* Region.** The first deploy into a new Region
   bootstraps again (Step 3).
 
-## Switching models
+### Switching models
 
 `BEDROCK_MODEL_ID` selects the chat model at synth time (`infra/app.ts`,
 `src/config.ts:114`). The embedding model is not configurable. To switch:
 
 1. Confirm the new model is listed and subscribed in your Region — Steps 1, 4, and 5.
-2. For `anthropic.claude-*`, accept the per-model EULA on **Bedrock → Model access**
-   first. This is the one family where the console step is still mandatory.
+2. For `anthropic.claude-*`, submit the First Time Use form (intended use case and
+   website URL) on **Bedrock → Model access** before the first invocation. This is the
+   one family where a console step is still mandatory.
 3. Set the **bare** base id and redeploy:
 
 ```bash
@@ -367,19 +423,33 @@ For which model to pick and what each costs, see
 [bedrock-model-comparison.md](bedrock-model-comparison.md). That comparison is not
 repeated here.
 
-## Cost
+### Cost
 
-At the default 5-minute cadence — 288 ticks/day, each one Converse call plus one Titan
-embedding — `zai.glm-4.7-flash` runs roughly **$0.02–$0.04/day**. Lambda, S3, and
-EventBridge at this volume are rounding errors next to that.
+Pricing on Bedrock changes; check the [Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/)
+before budgeting. As of the most recent AWS-published rates for `zai.glm-4.7-flash` in
+`us-east-1` ($0.07 per 1M input tokens, $0.40 per 1M output tokens) and Titan Text
+Embeddings V2 ($0.02 per 1M input tokens, no retries assumed), the worst case at the
+default cadence is reproducible:
 
-The two things that actually change the number are cadence and a leaked
-`FETCH_TRIGGER_TOKEN`, since an authorized caller with the token can drive Bedrock calls
-as fast as they can sign requests. Set up a budget alert before leaving the loop running
-unattended: [07-budget-protection.md](07-budget-protection.md) has the full breakdown
-and the alarm setup.
+```text
+calls/day           = 288                # 5-minute cadence
+output_tokens/call  = 512                # BEDROCK_MAX_OUTPUT_TOKENS cap
+output-only/day     = 288 × 512 × $0.40 / 1e6 ≈ $0.059
+```
 
-## Troubleshooting
+Add input tokens for the actual prompt size (typically a few hundred tokens) and the
+Titan embedding per tick (a few hundred tokens) and the realistic number lands well
+below $0.10/day. The $0.02–$0.04 range quoted in earlier revisions of this doc is a
+measured typical case, not a budget ceiling — a leaked `FETCH_TRIGGER_TOKEN` lets an
+authorised caller drive Bedrock calls as fast as they can sign requests, and the only
+real cap is the budget alarm below. Lambda, S3, and EventBridge at this volume are
+rounding errors next to Bedrock.
+
+Set up a budget alert before leaving the loop running unattended:
+[07-budget-protection.md](07-budget-protection.md) has the full breakdown and the
+alarm setup.
+
+### Troubleshooting
 
 | Symptom | Cause | Go to |
 |---|---|---|
@@ -396,5 +466,11 @@ and the alarm setup.
 | `403` from the on-demand trigger | `FETCH_TRIGGER_TOKEN` unset at deploy time, or the request isn't SigV4-signed | Steps 7, 9 |
 | Deploy succeeds, ticks run, nothing posts to Discord | Bedrock or Discord failure inside the tick — `agent_runs.error` records it per source | CloudWatch logs, [06-discord-webhook-setup.md](06-discord-webhook-setup.md) |
 
-The fastest general diagnostic is Step 6's `converse` probe. If it passes and the
-deployed bot still fails, the problem is not model access.
+The fastest general diagnostic is Step 6's `converse` probe. **It verifies the AWS CLI
+principal only, not the deployed Lambda:** the Lambda uses its own execution role and
+its own `BEDROCK_REGION` and `BEDROCK_MODEL_ID`, baked in at deploy time. If the probe
+passes and the deployed bot still fails on a Bedrock call, check the Lambda's role
+policy (`iam:PassRole` only attaches it; the role's own trust and inline policies are
+what grant `bedrock:InvokeModel`), confirm the deployed `BEDROCK_REGION` in the
+Lambda's environment matches a Region where the model is offered, and read the actual
+CloudWatch error before assuming model access is fine.

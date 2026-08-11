@@ -18,7 +18,7 @@ The new doc is end-to-end setup — what a reader needs to know *before* `cdk de
 - **A container runtime must be running locally.** `infra/stack.ts:84` uses `lambda.DockerImageFunction` with `DockerImageCode.fromImageAsset`, so `cdk deploy` builds an image locally and pushes it to ECR. Without a running Docker (or Finch/Podman) daemon the deploy fails with a message that says nothing about Bedrock or this tutorial. Unmentioned anywhere in the repo today.
 - **Titan Text Embeddings V2 is a second model the pipeline invokes.** `src/embed/titan.ts:16` pins `amazon.titan-embed-text-v2:0` and `infra/stack.ts:111` grants it; every tick calls it for RAG. A reader who arranges access only for the chat model gets an `AccessDeniedException` naming a model no doc ever told them about.
 
-**Verification is CLI-first.** Each step carries an `aws` command that proves the step succeeded, so a reader can hand the bulk of the procedure to an AI assistant with CLI access rather than clicking through consoles. The AWS Marketplace subscription (Step 4) is the one genuine console-only detour and the doc says so explicitly. A pre-deploy `bedrock-runtime converse` probe collapses subscription, EULA, Region, and model-id mistakes into one sub-cent pass/fail *before* the reader spends a deploy cycle discovering them.
+**Verification is CLI-first.** Each step carries an `aws` command that proves the step succeeded, so a reader can hand the bulk of the procedure to an AI assistant with CLI access rather than clicking through consoles. The AWS Marketplace subscription (Step 4) is the one genuine console-only detour and the doc says so explicitly. A pre-deploy `bedrock-runtime converse` probe (hardcoded against the default `zai.glm-4.7-flash`) collapses subscription, EULA, Region, and model-id mistakes into one sub-cent pass/fail *before* the reader spends a deploy cycle discovering them.
 
 **Constraints that shape every decision below:**
 
@@ -48,7 +48,7 @@ Mirrors `docs/06-discord-webhook-setup.md`: numbered "Step N: …" sections for 
 
 Every step carries a CLI verification. The doc opens by telling the reader they can hand the procedure to an AI assistant with AWS CLI access, with a copy-pasteable framing prompt, and flags Step 4 as the one console-only detour.
 
-```
+```markdown
 # AWS Bedrock setup
   2–3 sentence opener: what this doc covers, why it lives separately
   from 02-rehydration.md.
@@ -89,7 +89,7 @@ Every step carries a CLI verification. The doc opens by telling the reader they 
     recognize the shape of what's needed: iam:CreateRole /
     AttachRolePolicy / PassRole; lambda:CreateFunction /
     UpdateFunctionCode; s3:CreateBucket / PutBucketPolicy /
-    PutBucketTagging; events:CreateRule / PutTargets; ecr:
+    PutBucketTagging; events:PutRule / PutTargets; ecr:
     CreateRepository / GetAuthorizationToken / InitiateLayerUpload /
     UploadLayerPart / CompleteLayerUpload / PutImage;
     cloudformation:CreateStack / UpdateStack / DeleteStack;
@@ -168,7 +168,8 @@ Every step carries a CLI verification. The doc opens by telling the reader they 
     it later requires a redeploy.
   - npm run deploy.
   - What success looks like: stack outputs include the agent
-    Function URL and the smoke status URL; no AccessDenied in
+    Function URL (`AgentFunctionUrl`, which `npm run smoke` uses for the status
+    probe); no AccessDenied in
     CloudFormation events. If it fails:
       aws cloudformation describe-stack-events \
         --stack-name SqliteS3AgentTutorial --max-items 20
@@ -211,8 +212,11 @@ Every step carries a CLI verification. The doc opens by telling the reader they 
   ### Cost monitoring
     - Brief pointer to docs/07-budget-protection.md.
     - One-paragraph "what to expect at the default cadence":
-      ~$0.02–$0.04/day at the 5-minute loop cadence from
-      README.md §Cost.
+      a reproducible worst-case formula (288 ticks/day × 512 output tokens ×
+      the model's output rate per million tokens; Titan embeddings V2 at
+      $0.02 per 1M input tokens; no retries assumed) at the 5-minute loop
+      cadence. The `$0.02–$0.04/day` figure quoted in earlier revisions is a
+      measured typical case, not a budget ceiling.
 
   ### Troubleshooting
     A table: symptom → which step to revisit → the CLI command that
@@ -255,7 +259,7 @@ Lines 100–119 (the `## Bedrock setup` heading and its body) are removed. The f
 
 - **Lines 47–50:** currently link to `docs/02-rehydration.md#bedrock-setup`. Change to `docs/11-aws-bedrock-setup.md`. The phrasing stays — the warning that the deploy needs the Marketplace subscription before the first fetch is still true, just the link moves.
 - **Line 186 docs table:** add a new row next to the existing `bedrock-model-comparison.md` entry:
-  ```
+  ```markdown
   | [docs/11-aws-bedrock-setup.md](docs/11-aws-bedrock-setup.md) | Account type, deployer IAM, Marketplace subscription, Region, EULA, first-deploy smoke |
   ```
 
@@ -267,7 +271,7 @@ Before declaring done: search the entire repo for `02-rehydration.md#bedrock-set
 
 This is the RAG-extension lesson script. It assumes the student has already completed the base tutorial's Bedrock setup end-to-end, but currently names only `[08-rag-vector-search.md](08-rag-vector-search.md)` and `[01-architecture.md](01-architecture.md)` as prerequisites — neither of which is the canonical Bedrock-setup reference. Update line 5 to make the prereq explicit:
 
-```
+```markdown
 **Prerequisite:** the student has completed the base tutorial end-to-end,
 including the Bedrock setup documented in
 [11-aws-bedrock-setup.md](11-aws-bedrock-setup.md). The student has read
