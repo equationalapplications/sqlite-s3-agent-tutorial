@@ -6,13 +6,12 @@ memory between runs. Whatever has to outlive one run gets written down somewhere
 before the agent exits.
 
 You already built one. The `fetch` tick in this repo *is* an agent of exactly that shape,
-and the rest of this page is a ladder: rung 1 is the thing you have, and each rung above
-it is one step toward the fuller shape this pattern takes when there is more than one
-agent and more than one job.
+and the rest of this page is a ladder: rung 1 is the thing you have, and each rung above it
+is one step toward the fuller shape this pattern takes with more agents and more jobs.
 
-Only rung 1 is implemented here. Everything from rung 2 up is conceptual — no code, no
-tables, and no infrastructure in this repo correspond to it. Each rung says so, and points
-at the existing doc that already holds the piece a real implementation would start from.
+Only rung 1 is implemented here. Everything from rung 2 up is conceptual — no code,
+tables, or infrastructure in this repo correspond to it — and each rung points at the
+existing doc holding the piece a real implementation would start from.
 
 ## Rung 1: the fetch tick is already one
 
@@ -28,14 +27,13 @@ no timer, no loop, and no opinion about the clock.
 SQLite file from S3, call Bedrock twice, post to Discord, conditional-write the file back,
 exit. There is no "between" for the agent to exist in.
 
-**Statelessness between runs.** Careful here, because the honest version is more
-interesting than the slogan. `/tmp` is not wiped between invocations — warm containers
-reuse it, and this repo leans on that: the status reader keeps a cached database handle
-across invocations precisely because `/tmp` persists, and
-[docs/02-rehydration.md](02-rehydration.md) notes it survives until a redeploy. The
-guarantee is not that `/tmp` is empty. The guarantee is that **correctness never depends
-on what is in it.** Everything that must outlive an invocation lives in the S3 object; the
-local file is a cache that a cold start is free to throw away.
+**Statelessness between runs.** The honest version is more interesting than the slogan.
+`/tmp` is not wiped between invocations — warm containers reuse it, and this repo leans on
+that: the status reader keeps a cached database handle precisely because `/tmp` persists,
+and [docs/02-rehydration.md](02-rehydration.md) notes it survives until a redeploy. The
+guarantee is not that `/tmp` is empty; it is that **correctness never depends on what is
+in it.** Everything that must outlive an invocation lives in the S3 object, and the local
+file is a cache a cold start is free to throw away.
 
 **Why "composable."** Because no state is carried in the agent process, there is nothing
 to coordinate except the storage. Any number of these can exist — different schedules,
@@ -52,9 +50,8 @@ introduced — it is a name for the thing already running on your schedule.
 
 > **Not implemented in this repo.** Conceptual from here on.
 
-Today the job is hardcoded: every heartbeat does the same fetch, because the fetch *is*
-the schedule's payload. An agent that only ever does one thing does not need to be told
-what to do.
+Today the job is hardcoded: every heartbeat does the same fetch, because the fetch *is* the
+schedule's payload. An agent that only ever does one thing needs no instructions.
 
 The first generalization is to stop hardcoding it. Give the agent a **to-do list** — a
 table of pending work items, each with enough to decide whether it is due — and the loop
@@ -65,10 +62,8 @@ The natural home for that table is the same SQLite file the agent already hydrat
 keeps the one-file philosophy from [docs/01-architecture.md](01-architecture.md) intact —
 the work queue and the work product live in the same object, committed by the same
 conditional write. Nothing new has to exist for this rung; it is a table and a `WHERE`
-clause.
-
-At this rung the agent that reads the list is also the agent that does the work. That is
-the constraint rung 3 removes.
+clause. The agent that reads the list is still the agent that does the work — the
+constraint rung 3 removes.
 
 ## Rung 3: delegation and hierarchy
 
@@ -79,8 +74,8 @@ item, and moves on. The first agent becomes an **orchestrator**: its job is deci
 runs, not running it. The invoked one is a **sub-agent**.
 
 This is recursive, not one level of fan-out. A sub-agent handed "summarize this week's
-readings" can decide that is still too big, split it into seven days, and invoke seven
-sub-agents of its own. Depth is a property of the work, not of the topology.
+readings" can split it into seven days and invoke seven sub-agents of its own. Depth is a
+property of the work, not of the topology.
 
 The forcing constraint is Lambda's roughly 15-minute runtime ceiling. Any unit of work
 that might exceed it cannot be done inline — it has to be decomposable into pieces that
@@ -89,9 +84,9 @@ argument; it is how work outgrows a single invocation without outgrowing the pla
 
 One thing delegation does **not** change: the single-writer invariant from
 [docs/10-concurrency.md](10-concurrency.md). Fanning out multiplies *invocations*, not
-*writers*. Sub-agents do not each get their own conditional write to the shared S3 object
-— thirty agents contending on one ETag is the failure mode that doc describes, not a
-design. Where their results actually go is rung 4.
+*writers*. Sub-agents do not each get their own conditional write — thirty agents
+contending on one ETag is that doc's failure mode, not a design. Rung 4 is where their
+results go.
 
 ## Rung 4: intents through a queue, not direct writes
 
@@ -110,20 +105,18 @@ rewritten file — onto a queue. One pinned coordinator, concurrency 1, drains t
 batches and is the only thing that touches the master object. Collisions stop being
 detected and start being impossible, and the S3 write rate drops to one per batch rather
 than one per agent. The costs are the ones that doc already names: writes become
-asynchronous, and at-least-once delivery means the coordinator's apply step has to be
-idempotent.
+asynchronous, and at-least-once delivery means the apply step has to be idempotent.
 
 This rung also gives the master object a name it will need later. Seen from inside the
-hierarchy, it is the **central memory**: the one shared thing every agent's intents
-eventually land in, and the only place where the system's state is authoritative. Rung 6
-is about what that memory could be shaped like.
+hierarchy, it is the **central memory**: the one shared thing every agent's intents land
+in, and the only place the system's state is authoritative. Rung 6 is about its shape.
 
 ## Rung 5: follow-up tasks and the EC2 escape hatch
 
 > **Not implemented in this repo.**
 
-Two things break the ladder if left unaddressed, and both are answered by pieces already
-on it.
+Two things would break the ladder if left unaddressed, and both are answered by pieces
+already on it.
 
 **Work that doesn't finish.** A sub-agent approaching its timeout does not retry-loop
 inside Lambda, and does not silently drop what it was doing. It writes a **follow-up
@@ -161,22 +154,20 @@ orchestrator, sub-agent, or task line reads and writes its own namespace via
 because `read()` accepts either one entity id or an array of them.
 
 **Tiering.** Those namespaces can be weighted rather than merely merged. The README's own
-example reads `['tier_wisdom', 'tier_fact', 'tier_working']` with `tierWeights` of `2`,
-`1`, and `0.25` — durable curated knowledge dominating, an in-flight sub-agent's working
-context present but nearly discounted. The tiers are just entity ids with a naming
-convention and different weights, which is why the same mechanism serves both purposes.
+example reads `['tier_wisdom', 'tier_fact', 'tier_working']` with `tierWeights` of `2`, `1`,
+and `0.25` — durable curated knowledge dominating, an in-flight sub-agent's working context
+present but nearly discounted. Tiers are just entity ids with a naming convention.
 
 **A small knowledge graph.** A per-entity seeded ontology (`node_types` and `edge_types`,
 under a `'strict'`, `'emergent'`, or `'off'` mode — `off` by default) lets stored facts
-carry typed `edges` rather than opaque text. An intent coming back from a sub-agent can
-say *this artifact was produced by that run* as a typed relationship instead of a sentence
-someone has to re-parse later.
+carry typed `edges` rather than opaque text. An intent coming back from a sub-agent can say
+*this artifact was produced by that run* as a relationship, not a sentence to re-parse.
 
 **Scoped permissions.** Because both reads and writes are already partitioned by
 `entityId`, that partition is the natural enforcement point: restrict a low-trust leaf
-agent to its own namespaces, or to specific tiers within one, and it cannot read or
-corrupt a sibling's memory or the orchestrator's. The permission boundary a hierarchy
-needs turns out to be the same boundary the storage layer already draws.
+agent to its own namespaces, or to specific tiers within one, and it cannot read or corrupt
+a sibling's memory or the orchestrator's. The permission boundary a hierarchy needs is the
+one the storage layer already draws.
 
 ## Where this repo stops
 
@@ -184,7 +175,7 @@ Rung 1, and nothing above it. The `fetch` tick is a real lightweight composable 
 rungs 2 through 6 are a sketch of what it grows into, not a backlog.
 
 For the concrete pieces a real implementation would draw on:
-[docs/10-concurrency.md](10-concurrency.md) for the single-writer queue that rungs 4 and 5
-are built on, [docs/05-from-tutorial-to-prod.md](05-from-tutorial-to-prod.md) for the
-exits from SQLite-on-S3 once you need transactional consistency across agents, and
-`core-llm-wiki`'s README for tiered memory, ontology, and scoped permissions.
+[docs/10-concurrency.md](10-concurrency.md) for the single-writer queue rungs 4 and 5 are
+built on, [docs/05-from-tutorial-to-prod.md](05-from-tutorial-to-prod.md) for the exits from
+SQLite-on-S3 once you need transactional consistency across agents, and `core-llm-wiki`'s
+README for tiered memory, ontology, and scoped permissions.
