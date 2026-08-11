@@ -184,6 +184,7 @@ multi-writer escape hatch it looks like.
 | [docs/09-lesson-script.md](docs/09-lesson-script.md) | A 10-lesson script for teaching the RAG extension (frame, check-in questions, expected reasoning) |
 | [docs/10-concurrency.md](docs/10-concurrency.md) | Optimistic S3 rehydration, 412 handling, rebase-and-retry, the single-writer queue |
 | [docs/11-aws-bedrock-setup.md](docs/11-aws-bedrock-setup.md) | Account type, deployer IAM, Marketplace subscription, Region, EULA, first-deploy smoke |
+| [docs/12-composable-agents.md](docs/12-composable-agents.md) | The fetch tick as a lightweight composable agent, and the ladder up from it |
 | [docs/bedrock-model-comparison.md](docs/bedrock-model-comparison.md) | Why `zai.glm-4.7-flash` is the default, and alternatives |
 
 ## Cost
