@@ -2,8 +2,8 @@
 
 A **lightweight, composable cloud agent** spins up, works for a few minutes — or a few
 seconds — and goes away. No process stays resident. No state is held in memory between
-runs. Whatever has to outlive one run gets written down somewhere durable
-before the agent exits.
+runs. Whatever has to outlive one run gets written down somewhere durable before the agent
+exits.
 
 You already built one. The `fetch` tick in this repo *is* an agent of exactly that shape,
 and the rest of this page is a ladder: rung 1 is the thing you have, and each rung above it
@@ -38,10 +38,11 @@ file is a cache a cold start is free to throw away.
 **Why "composable."** Because no state is carried in the agent process, there is nothing
 to coordinate except the storage. Any number of these can exist — different schedules,
 different triggers, different jobs — provided they agree on the storage contract. This
-repo's contract is the conditional write on the S3 object, backed at the platform layer by
+repo's contract is the conditional write on the S3 object described in
+[docs/10-concurrency.md](10-concurrency.md), backed at the platform layer by
 `reservedConcurrentExecutions: 1` — belt and suspenders, as
-[docs/10-concurrency.md](10-concurrency.md) puts it. That contract, not any shared runtime,
-is what makes a second agent possible.
+[docs/01-architecture.md](01-architecture.md) puts it. That contract, not any shared
+runtime, is what makes a second agent possible.
 
 This is the load-bearing rung. "Lightweight cloud agent" is not an abstraction being
 introduced — it is a name for the thing already running on your schedule.
@@ -128,9 +129,9 @@ connection open, or stream for an hour, or genuinely run past any Lambda budget 
 justify. Decomposition does not help there. The escape hatch is that rung 4's contract
 never mentions Lambda — [docs/10-concurrency.md](10-concurrency.md) happens to draw it
 with Lambdas, but the contract says only *consume from the queue, emit an intent*. An EC2
-instance or a Fargate task can satisfy it as a peer. It reads the same
-queue and emits the same kind of intent, and the coordinator cannot tell, and does not
-need to, which compute produced it. That is the payoff for making the queue the seam
+instance or a Fargate task can satisfy it as a peer: it reads the same queue and emits the
+same kind of intent, and the coordinator cannot tell, and does not need to, which compute
+produced it. That is the payoff for making the queue the seam
 rather than the function: compute becomes a per-task choice, not an architectural one.
 
 ## Rung 6: tiered memory, a small knowledge graph, and scoped permissions
