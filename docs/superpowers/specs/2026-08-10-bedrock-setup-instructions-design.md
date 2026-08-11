@@ -1,7 +1,7 @@
 # AWS Bedrock Setup Instructions — Design
 
 **Date:** 2026-08-10
-**Status:** Approved
+**Status:** Implemented (PR `docs/aws-bedrock-setup`, 2026-08-10)
 **Scope:** Documentation-only change. Closes the gap between what the tutorial currently tells a reader about getting Bedrock working and what they actually need to know. No code changes.
 
 ---
