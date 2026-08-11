@@ -141,3 +141,50 @@ need to, which compute produced it.
 
 That is the payoff for making the queue the seam rather than the function: the choice of
 compute becomes a per-task decision instead of an architectural one.
+
+## Rung 6: tiered memory, a small knowledge graph, and scoped permissions
+
+> **Not implemented in this repo, and the most speculative rung on the ladder.** It names
+> a specific external package as an illustration of what rung 4's central memory could
+> look like in a fuller form. Nothing here is a recommendation to adopt it in this
+> tutorial, and no dependency is implied.
+
+Rung 4 named the central memory without saying what it is shaped like. In this repo it is
+two flat tables. A hierarchy of agents wants more than that, and
+[`@equationalapplications/core-llm-wiki`](https://github.com/equationalapplications/expo-llm-wiki/blob/main/packages/core/README.md)
+— a platform-agnostic TypeScript memory engine built for hybrid LLM memory over SQLite —
+happens to be organized around four things a hierarchy needs.
+
+**Namespacing.** Its `entityId` is the identifier a hierarchy is already missing: each
+orchestrator, sub-agent, or task line reads and writes its own namespace via
+`write(entityId, { event_type, summary })`. A coordinator can read across several at once,
+because `read()` accepts either one entity id or an array of them.
+
+**Tiering.** Those namespaces can be weighted rather than merely merged. The README's own
+example reads `['tier_wisdom', 'tier_fact', 'tier_working']` with `tierWeights` of `2`,
+`1`, and `0.25` — durable curated knowledge dominating, an in-flight sub-agent's working
+context present but nearly discounted. The tiers are just entity ids with a naming
+convention and different weights, which is why the same mechanism serves both purposes.
+
+**A small knowledge graph.** A per-entity seeded ontology (`node_types` and `edge_types`,
+under a `'strict'`, `'emergent'`, or `'off'` mode — `off` by default) lets stored facts
+carry typed `edges` rather than opaque text. An intent coming back from a sub-agent can
+say *this artifact was produced by that run* as a typed relationship instead of a sentence
+someone has to re-parse later.
+
+**Scoped permissions.** Because both reads and writes are already partitioned by
+`entityId`, that partition is the natural enforcement point: restrict a low-trust leaf
+agent to its own namespaces, or to specific tiers within one, and it cannot read or
+corrupt a sibling's memory or the orchestrator's. The permission boundary a hierarchy
+needs turns out to be the same boundary the storage layer already draws.
+
+## Where this repo stops
+
+Rung 1, and nothing above it. The `fetch` tick is a real lightweight composable agent;
+rungs 2 through 6 are a sketch of what it grows into, not a backlog.
+
+For the concrete pieces a real implementation would draw on:
+[docs/10-concurrency.md](10-concurrency.md) for the single-writer queue that rungs 4 and 5
+are built on, [docs/05-from-tutorial-to-prod.md](05-from-tutorial-to-prod.md) for the
+exits from SQLite-on-S3 once you need transactional consistency across agents, and
+`core-llm-wiki`'s README for tiered memory, ontology, and scoped permissions.
