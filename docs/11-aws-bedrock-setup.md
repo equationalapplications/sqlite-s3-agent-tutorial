@@ -315,3 +315,86 @@ scheduled tick or redeploy with the variable set. If the trigger returns `403`, 
 the token or the signature — not Bedrock. Bedrock problems show up as a tick that runs
 and posts nothing; check the Lambda's CloudWatch logs and match the exception against
 [Troubleshooting](#troubleshooting).
+
+---
+
+# Reference
+
+Everything above is the procedure. What follows is the material you come back for.
+
+## Region availability
+
+The procedure pins `us-east-1`. If you move:
+
+- **Set `AWS_REGION`.** `scripts/deploy.sh:5` reads it, and it becomes the CDK stack's
+  Region. That single variable is the whole change for a deploy.
+- **`BEDROCK_REGION` is not a deploy knob.** `infra/stack.ts:74` hardcodes the deployed
+  Lambda's `BEDROCK_REGION` to the stack's own Region, so setting it in your shell before
+  a deploy does nothing. It only matters for local runs, where `src/config.ts:135` lets
+  it override `AWS_REGION` — useful if you want to run the writer locally against a
+  Bedrock Region different from the rest of your setup.
+- **Model availability is per Region.** Not every model in
+  [bedrock-model-comparison.md](bedrock-model-comparison.md) exists everywhere; re-run
+  Step 1's `list-foundation-models` in the new Region before assuming.
+- **The Marketplace subscription is per Region.** Moving Regions means subscribing again
+  (Step 4). This catches people who move from `us-east-1` after a working deploy.
+- **Bootstrap is per account *and* Region.** The first deploy into a new Region
+  bootstraps again (Step 3).
+
+## Switching models
+
+`BEDROCK_MODEL_ID` selects the chat model at synth time (`infra/app.ts`,
+`src/config.ts:114`). The embedding model is not configurable. To switch:
+
+1. Confirm the new model is listed and subscribed in your Region — Steps 1, 4, and 5.
+2. For `anthropic.claude-*`, accept the per-model EULA on **Bedrock → Model access**
+   first. This is the one family where the console step is still mandatory.
+3. Set the **bare** base id and redeploy:
+
+```bash
+export BEDROCK_MODEL_ID=anthropic.claude-...    # bare id, no global./us. prefix
+npm run deploy
+```
+
+The inference-profile prefix is supplied by the model's family in
+`src/format/families.ts`, not by you: `zai.*` takes the bare id only, `amazon.nova-*`
+accepts bare or `us.`, and `anthropic.claude-*` defaults to `global.`. Configuring an id
+that already carries a prefix throws at startup by design, and the generated IAM policy
+is derived from the same family resolution — so hand-editing a prefix breaks the policy
+and the call together.
+
+For which model to pick and what each costs, see
+[bedrock-model-comparison.md](bedrock-model-comparison.md). That comparison is not
+repeated here.
+
+## Cost
+
+At the default 5-minute cadence — 288 ticks/day, each one Converse call plus one Titan
+embedding — `zai.glm-4.7-flash` runs roughly **$0.02–$0.04/day**. Lambda, S3, and
+EventBridge at this volume are rounding errors next to that.
+
+The two things that actually change the number are cadence and a leaked
+`FETCH_TRIGGER_TOKEN`, since an authorized caller with the token can drive Bedrock calls
+as fast as they can sign requests. Set up a budget alert before leaving the loop running
+unattended: [07-budget-protection.md](07-budget-protection.md) has the full breakdown
+and the alarm setup.
+
+## Troubleshooting
+
+| Symptom | Cause | Go to |
+|---|---|---|
+| `Cannot connect to the Docker daemon` during `npm run deploy` | No container runtime running; the Lambda is a container image | Step 0 |
+| `AccessDeniedException` on `list-foundation-models` | Deploying principal lacks Bedrock read permissions | Step 2 |
+| `Could not connect to the endpoint URL` for a `bedrock` call | Bedrock not available in that Region | Step 1 |
+| `AccessDenied` / `CREATE_FAILED` during `npm run deploy` | Deployer IAM, most often a bootstrap-only permission on the first run | Steps 2, 3 |
+| `AccessDeniedException` naming the **chat** model | Marketplace subscription missing, or made in another Region | Steps 4, 1 |
+| `AccessDeniedException` naming `amazon.titan-embed-text-v2:0` | Amazon-family model access not enabled — a *separate* gate from the chat model | Step 5 |
+| `AccessDeniedException` on an `anthropic.claude-*` model | Per-model EULA not accepted | Step 5 |
+| `ValidationException` on the first call | Malformed model id — usually a hand-added inference-profile prefix the family rejects | Step 6 note, `src/format/families.ts` |
+| `ResourceNotFoundException` | A bare-id family got a prefix, e.g. `global.zai.glm-4.7-flash` | Step 6 note |
+| Startup error: *"already carries the inference-profile prefix"* | `BEDROCK_MODEL_ID` was set to a prefixed id | Switching models, above |
+| `403` from the on-demand trigger | `FETCH_TRIGGER_TOKEN` unset at deploy time, or the request isn't SigV4-signed | Steps 7, 9 |
+| Deploy succeeds, ticks run, nothing posts to Discord | Bedrock or Discord failure inside the tick — `agent_runs.error` records it per source | CloudWatch logs, [06-discord-webhook-setup.md](06-discord-webhook-setup.md) |
+
+The fastest general diagnostic is Step 6's `converse` probe. If it passes and the
+deployed bot still fails, the problem is not model access.
