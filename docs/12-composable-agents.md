@@ -13,6 +13,42 @@ Only rung 1 is implemented here. Everything from rung 2 up is conceptual — no 
 tables, or infrastructure in this repo correspond to it — and each rung points at the
 existing doc holding the piece a real implementation would start from.
 
+The shape the full ladder takes, top to bottom:
+
+```text
+                         heartbeat
+                             │
+                             ▼
+                     ┌───────────────┐
+                     │  orchestrator │
+                     └───────┬───────┘
+                             │ delegates
+                             ▼
+                     ┌───────────────┐
+                     │   sub-agent   │
+                     └───────┬───────┘
+                             │ delegates
+                 ┌───────────┴───────────┐
+                 ▼                       ▼
+         ┌───────────────┐       ┌───────────────┐
+         │   sub-agent   │       │   sub-agent   │─────┐ emits
+         └───────┬───────┘       └───────────────┘     │ intent
+                 │                                     ▼
+                 ▼                              ┌─────────────┐
+               .....                            │ SQS queue   │
+      recursion expands to any depth            └──────┬──────┘
+               in parallel                             │
+                                                       ▼
+                                             ┌───────────────────┐
+                                             │ single writer     │
+                                             └────────┬──────────┘
+                                                      │
+                                                      ▼
+                                             ┌───────────────────┐
+                                             │ S3 central memory │
+                                             └───────────────────┘
+```
+
 ## Rung 1: the fetch tick is already one
 
 Nothing new is introduced at this rung. It is the same system described in
