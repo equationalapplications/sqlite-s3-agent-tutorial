@@ -26,7 +26,7 @@
     "@aws-sdk/client-s3": "^3.1103.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.11",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.0",
     "@smithy/util-stream": "^4.7.16",
     "aws-cdk": "^2.1135.0",
