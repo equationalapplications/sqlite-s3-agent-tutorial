@@ -22,19 +22,19 @@
   "dependencies": {
     "better-sqlite3": "^13.0.1",
     "sqlite-vec": "^0.1.9",
-    "@aws-sdk/client-bedrock-runtime": "^3.1103.0",
-    "@aws-sdk/client-s3": "^3.1103.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.1146.0",
+    "@aws-sdk/client-s3": "^3.1146.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.0",
-    "@smithy/util-stream": "^4.7.16",
-    "aws-cdk": "^2.1135.0",
-    "aws-cdk-lib": "^2.263.0",
+    "@smithy/util-stream": "^4.8.2",
+    "aws-cdk": "^2.1144.0",
+    "aws-cdk-lib": "^2.272.0",
     "aws-sdk-client-mock": "^4.1.0",
     "constructs": "^10.8.1",
-    "tsx": "^4.23.5",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.3"
   }
 }
