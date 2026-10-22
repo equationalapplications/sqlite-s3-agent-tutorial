@@ -9,3 +9,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+  # The Lambda image's Node base (Dockerfile), pinned by digest. The pin is
+  # what makes `cdk deploy` rebuild the image, so base-image patches only
+  # reach Lambda through this PR (or a manual digest bump) and a redeploy.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
