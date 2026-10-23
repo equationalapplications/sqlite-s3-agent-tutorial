@@ -5,8 +5,9 @@ updates:
     schedule:
       interval: "weekly"
     cooldown:
-      # Supply-chain SOP: no version adopted until its upstream release is
-      # >= 14 days old (only CRITICAL security is exempt, by hand).
+      # Supply-chain SOP: version updates wait until the upstream release is
+      # >= 14 days old. Cooldown never applies to Dependabot security-update
+      # PRs; under the SOP, hold those by hand unless the advisory is CRITICAL.
       default-days: 14
     groups:
       minor-and-patch:
@@ -21,6 +22,7 @@ updates:
     schedule:
       interval: "weekly"
     cooldown:
-      # Supply-chain SOP: no version adopted until its upstream release is
-      # >= 14 days old (only CRITICAL security is exempt, by hand).
+      # Supply-chain SOP: version updates wait until the upstream release is
+      # >= 14 days old. Cooldown never applies to Dependabot security-update
+      # PRs; under the SOP, hold those by hand unless the advisory is CRITICAL.
       default-days: 14
