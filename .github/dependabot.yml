@@ -4,8 +4,25 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      # Supply-chain SOP: version updates wait until the upstream release is
+      # >= 14 days old. Cooldown never applies to Dependabot security-update
+      # PRs; under the SOP, hold those by hand unless the advisory is CRITICAL.
+      default-days: 14
     groups:
       minor-and-patch:
         update-types:
           - "minor"
           - "patch"
+  # The Lambda image's Node base (Dockerfile), pinned by digest. The pin is
+  # what makes `cdk deploy` rebuild the image, so base-image patches only
+  # reach Lambda through this PR (or a manual digest bump) and a redeploy.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      # Supply-chain SOP: version updates wait until the upstream release is
+      # >= 14 days old. Cooldown never applies to Dependabot security-update
+      # PRs; under the SOP, hold those by hand unless the advisory is CRITICAL.
+      default-days: 14
