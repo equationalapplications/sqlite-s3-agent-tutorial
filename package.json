@@ -22,8 +22,8 @@
   "dependencies": {
     "better-sqlite3": "^13.0.1",
     "sqlite-vec": "^0.1.9",
-    "@aws-sdk/client-bedrock-runtime": "^3.1149.0",
-    "@aws-sdk/client-s3": "^3.1149.0"
+    "@aws-sdk/client-bedrock-runtime": "^3.1152.0",
+    "@aws-sdk/client-s3": "^3.1152.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
@@ -35,6 +35,6 @@
     "constructs": "^10.8.1",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.4"
+    "vitest": "^5.0.5"
   }
 }
