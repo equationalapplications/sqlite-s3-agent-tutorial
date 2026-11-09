@@ -81,11 +81,13 @@ if (baseRef) {
   try {
     const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
     }).trim()
     baseRaw = execFileSync("git", ["show", `${baseRef}:${lockfile}`], {
       cwd: repoRoot,
       encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
     })
   } catch (err) {
